@@ -1,0 +1,11 @@
+{
+  "name": "compact-warning",
+  "owner": { "name": "atteahma" },
+  "plugins": [
+    {
+      "name": "compact-warning",
+      "source": "./",
+      "description": "Warns a session before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line."
+    }
+  ]
+}

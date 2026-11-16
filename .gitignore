@@ -1,0 +1,9 @@
+# Written by tools/check: the Claude Code version the checks last passed on,
+# on this machine.
+tested-version.txt
+
+# Written by the engine when it loads the mod from this folder.
+.claude-plugin/types/
+
+.DS_Store
+*.log

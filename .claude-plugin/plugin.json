@@ -1,0 +1,31 @@
+{
+  "name": "compact-warning",
+  "version": "0.1.0",
+  "description": "Warns a session before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line.",
+  "author": { "name": "atteahma" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "warnPercent": {
+      "type": "number",
+      "title": "First nudge (%)",
+      "description": "Tell the session to look for a breakpoint at this percentage of the point where auto-compaction fires.",
+      "default": 80,
+      "min": 1,
+      "max": 99
+    },
+    "stopPercent": {
+      "type": "number",
+      "title": "Second nudge (%)",
+      "description": "Tell the session to stop at the next breakpoint at this percentage of the point where auto-compaction fires.",
+      "default": 88,
+      "min": 1,
+      "max": 99
+    },
+    "unattended": {
+      "type": "boolean",
+      "title": "Compact without asking",
+      "description": "When the session proposes a compaction, run it at once and tell the session to continue. Off: put the /compact line in the prompt box and wait for Enter.",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Checks the mod against the installed Claude Code: validate, type-check, test.
+#
+# When the checks pass, it writes the Claude Code version to tested-version.txt.
+# The mod compares that file with the running version at each session start and
+# flags a mismatch in its status line. Run this after every Claude Code update.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+readonly TYPES=.claude-plugin/types/claude-code/index.d.ts
+readonly TESTED=tested-version.txt
+readonly TYPESCRIPT=typescript@5.9
+
+version="$(claude --version | awk '{print $1}')"
+echo "== Claude Code ${version}"
+
+echo "== validate"
+claude plugin validate . | grep -E '^(✔|✘)|hooks:|error' || true
+claude plugin validate . >/dev/null
+
+echo "== type check"
+typecheck=passed
+if [[ ! -f "${TYPES}" ]] || ! head -1 "${TYPES}" | grep -qF "Claude Code ${version}."; then
+  typecheck=skipped
+  echo "Skipped: the API types in .claude-plugin/types are missing or from another version."
+  echo "To refresh them, run 'claude --plugin-dir .' in this folder once, exit, and run this again."
+elif ! command -v npx >/dev/null; then
+  typecheck=skipped
+  echo "Skipped: npx is not on the PATH."
+else
+  npx -y -p "${TYPESCRIPT}" tsc -p .
+fi
+
+echo "== test"
+claude plugin test .
+
+printf '%s\n' "${version}" > "${TESTED}"
+echo "== passed on Claude Code ${version} (type check: ${typecheck}); wrote ${TESTED}"
