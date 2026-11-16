@@ -20,6 +20,8 @@ type World = {
   isUsageBroken: boolean
   agents: AgentInfo[]
   isAgentListBroken: boolean
+  /** What the next tool call answers. */
+  toolResult: unknown
   statuses: string[]
   toasts: string[]
   fills: string[]
@@ -35,6 +37,7 @@ function world(on: On, start: Partial<World> = {}): World {
     isUsageBroken: false,
     agents: [],
     isAgentListBroken: false,
+    toolResult: {},
     statuses: [],
     toasts: [],
     fills: [],
@@ -101,7 +104,7 @@ function world(on: On, start: Partial<World> = {}): World {
 
     return { text: e.text }
   })
-  on('tool.call', () => ({ result: {} }))
+  on('tool.call', () => ({ result: w.toolResult as never }))
   on('turn.complete', () => ({ text: 'done' }))
   on('session.compact', (_, e) => {
     // A plugin's own call arrives bare in a test: in a session the engine
@@ -298,7 +301,7 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
 
   expect(String(stored.result)).toContain('Stored.')
   expect(String(stored.result)).toContain('End your turn now')
-  expect(String(stored.result)).not.toContain('have not finished')
+  expect(String(stored.result)).not.toContain('Still running')
   expect(w.fills).toEqual([])
 
   await $.turn.complete(TURN_END)
@@ -323,7 +326,7 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
   expect(w.fills.length).toBe(3)
 })
 
-test('a proposal names the agents that have not finished', async ($, on) => {
+test('a proposal names the agents that are still running', async ($, on) => {
   const w = world(on, {
     tokens: at(85),
     agents: [
@@ -337,7 +340,7 @@ test('a proposal names the agents that have not finished', async ($, on) => {
   const stored = await propose($, 'Keep the plan.')
 
   expect(String(stored.result)).toContain(
-    'Agents that have not finished: "Search the logs" (Explore, id a1). Each one may report',
+    'Still running, as far as the mod can tell: agent "Search the logs" (Explore, id a1). Each one may report',
   )
   expect(String(stored.result)).toContain('Then end your turn, with one or two lines')
   expect(String(stored.result)).not.toContain('a2')
@@ -346,6 +349,42 @@ test('a proposal names the agents that have not finished', async ($, on) => {
   // The proposal is stored all the same.
   await $.turn.complete(TURN_END)
   expect(w.fills).toEqual(['/compact Keep the plan.'])
+})
+
+test('a background task is named until the mod sees its end', async ($, on) => {
+  const w = world(on, { tokens: at(85) })
+  await $.session.start(START)
+
+  w.toolResult = { backgroundTaskId: 'b1' }
+  await $.tool.call({ tool: 'Bash', command: 'npm run build', description: 'Build the site' })
+  w.toolResult = { status: 'async_launched', taskId: 'w1', workflowName: 'review-changes' }
+  await $.tool.call({ tool: 'Workflow', script: 'export const meta = {}' } as never)
+  // A subagent's command reports to the subagent, not to the main conversation.
+  w.toolResult = { backgroundTaskId: 'b2' }
+  await $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'a1' })
+  w.toolResult = {}
+
+  const first = await propose($, 'Keep the plan.')
+  expect(String(first.result)).toContain(
+    'Still running, as far as the mod can tell: command "Build the site" (id b1); workflow "review-changes" (id w1). Each',
+  )
+  expect(String(first.result)).not.toContain('b2')
+
+  // The command's notification says it ended.
+  await $.prompt.submit({
+    text: '<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>',
+    wait: false,
+    origin: { kind: 'task-notification' },
+  })
+  const second = await propose($, 'Keep the plan.')
+  expect(String(second.result)).toContain('can tell: workflow "review-changes" (id w1). Each')
+
+  // The model stops the workflow.
+  w.toolResult = { message: 'Stopped', task_id: 'w1', task_type: 'local_workflow' }
+  await $.tool.call({ tool: 'TaskStop', task_id: 'w1' } as never)
+  const third = await propose($, 'Keep the plan.')
+  expect(String(third.result)).not.toContain('Still running')
+  expect(String(third.result)).toContain('End your turn now')
 })
 
 test('an agent list that fails holds no proposal back', async ($, on) => {

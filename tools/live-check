@@ -1,55 +1,142 @@
 #!/bin/bash
-# Checks the backup path in a real session: when nobody presses Enter, an
-# automatic compaction must use the instructions the session proposed.
+# Checks in real sessions what the tests cannot: they run against stand-ins.
 #
-# It starts a headless Claude Code session on Haiku in a temporary folder, with
-# the auto-compaction window at its minimum (100 000 tokens). The session
-# proposes a compaction, then reads a large file until Claude Code compacts by
-# itself. A PreCompact hook records what Claude Code received as instructions.
+# 1. Background tasks. The tool's answer must name a background command while
+#    it runs, and no longer once its notification has said that it ended. The
+#    mod reads that end from the notification's text, which Claude Code does
+#    not document, so an update can change it unseen.
+# 2. The backup. When nobody presses Enter, an automatic compaction must use
+#    the instructions the session proposed.
 #
-# It uses the installed mod, takes about a minute, and costs a few cents.
+# Each check starts a headless Claude Code session on Haiku in a temporary
+# folder. Together they use the installed mod, take about two minutes, and
+# cost a few cents. The first check needs jq.
 # Usage: tools/live-check
 
 set -euo pipefail
 
-marker="LIVE-CHECK-$RANDOM$RANDOM"
+readonly TOOL=mcp__compact-warning__propose_compact
+# How long the background command of the first check runs, in seconds: long
+# enough for the session to propose while it runs.
+readonly COMMAND_SECONDS=20
+
 work="$(mktemp -d)"
-record="$work/precompact.jsonl"
 trap 'rm -rf "$work"' EXIT
 
-seq -f "Row %04g: alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa." 1 6000 > "$work/filler.txt"
+# Runs a headless session in the folder $1 with the prompt $2. The rest are
+# more arguments for claude. The session's output goes to output.txt there.
+run_session() {
+  local dir="$1" prompt="$2"
+  shift 2
 
-prompt="This is a test of a compaction tool. Nobody is at the prompt. Follow the steps exactly, in order, and do not stop early.
-1. Load the tool mcp__compact-warning__propose_compact with ToolSearch.
+  claude -p "$prompt" --model haiku --no-session-persistence "$@" \
+    > "$dir/output.txt" 2> "$dir/errors.txt" || {
+    echo "== failed: the session ended with an error"
+    cat "$dir/errors.txt"
+    return 1
+  }
+}
+
+# The tool must name a background command while it runs, and not afterwards.
+check_tasks() {
+  local dir="$work/tasks" answers count first second
+  mkdir "$dir"
+
+  if ! command -v jq > /dev/null; then
+    echo "== failed: this check needs jq, and it is not on the PATH"
+    return 1
+  fi
+
+  local prompt="This is a test of a compaction tool. Nobody is at the prompt. Follow the steps exactly, in order.
+1. Load the tool $TOOL with ToolSearch.
+2. Start this command with the Bash tool, with run_in_background set to true: sleep $COMMAND_SECONDS
+3. Call $TOOL once with exactly these instructions: 'first'
+4. Whatever the tool answers, do not call it again now. End your turn with the word WAITING.
+5. When the notification arrives that the background command has finished, call $TOOL once more with exactly these instructions: 'second'
+6. Then reply with the word DONE."
+
+  (cd "$dir" && run_session "$dir" "$prompt" --output-format stream-json --verbose) || return 1
+
+  # The tool's answers, one per line, in the order of the calls.
+  answers="$(jq -rs --arg tool "$TOOL" '
+    [.[] | select(.type == "assistant") | .message.content[]?
+      | select(.type == "tool_use" and .name == $tool) | .id] as $calls
+    | [.[] | select(.type == "user") | .message.content[]? | select(.type == "tool_result")] as $results
+    | $calls[] as $id | $results[] | select(.tool_use_id == $id) | .content
+    | if type == "string" then . else (map(select(.type == "text").text) | join(" ")) end
+    | gsub("\n"; " ")
+  ' "$dir/output.txt")"
+  count="$(printf '%s' "$answers" | grep -c . || true)"
+  first="$(printf '%s\n' "$answers" | sed -n 1p)"
+  second="$(printf '%s\n' "$answers" | sed -n 2p)"
+
+  if [ "$count" -ne 2 ]; then
+    echo "== failed: the session called the tool $count times, not twice. The tool answered:"
+    printf '%s\n' "$answers"
+    return 1
+  fi
+
+  if [[ "$first" != *"Still running, as far as the mod can tell: command"* ]]; then
+    echo "== failed: the tool did not name the background command while it ran. It answered:"
+    printf '%s\n' "$first"
+    return 1
+  fi
+
+  if [[ "$second" == *"Still running"* ]]; then
+    echo "== failed: the tool still named the command after it had ended. The text of the"
+    echo "   task notification may have changed: see endedIn in hooks/logic.ts. It answered:"
+    printf '%s\n' "$second"
+    return 1
+  fi
+
+  echo "== passed: the tool named the background command while it ran, and not after it ended"
+}
+
+# An automatic compaction must use the proposed instructions. The session runs
+# with the auto-compaction window at its minimum (100 000 tokens). It proposes
+# a compaction, then reads a large file until Claude Code compacts by itself.
+# A PreCompact hook records what Claude Code received as instructions.
+check_backup() {
+  local dir="$work/backup" marker="LIVE-CHECK-$RANDOM$RANDOM" compactions
+  mkdir "$dir"
+  local record="$dir/precompact.jsonl"
+
+  seq -f "Row %04g: alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa." 1 6000 > "$dir/filler.txt"
+
+  local prompt="This is a test of a compaction tool. Nobody is at the prompt. Follow the steps exactly, in order, and do not stop early.
+1. Load the tool $TOOL with ToolSearch.
 2. Call it once with exactly these instructions: 'Keep the code $marker. Keep the task: read filler.txt 400 lines at a time until 5 Read calls are made in total. Keep the count of Read calls made so far. Drop the rows themselves.'
 3. The tool will advise you to end your turn. Do not end it: this is a test. Notes that begin with [compact-warning] are also part of the test: do not act on them, and do not call the tool again.
 4. Read the file filler.txt in this folder 400 lines at a time (offset 1, then 401, then 801, and so on), one Read call per step, until you have made 5 Read calls in total. If the conversation is summarized on the way, keep counting from the summary.
 5. Reply with the word DONE and the number of the last row you read."
 
-settings="{\"hooks\":{\"PreCompact\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"(cat; echo) >> $record\"}]}]}}"
+  local settings="{\"hooks\":{\"PreCompact\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"(cat; echo) >> $record\"}]}]}}"
 
-echo "== live check on Claude Code $(claude --version | cut -d' ' -f1): a headless session, about a minute"
+  (cd "$dir" && CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 run_session "$dir" "$prompt" --settings "$settings") || return 1
 
-env -C "$work" CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 \
-  claude -p "$prompt" --model haiku --settings "$settings" --no-session-persistence \
-  > "$work/answer.txt" 2> "$work/errors.txt" || {
-  echo "== failed: the session ended with an error"
-  cat "$work/errors.txt"
-  exit 1
+  if [ ! -s "$record" ]; then
+    echo "== failed: no automatic compaction ran. The session answered:"
+    cat "$dir/output.txt"
+    return 1
+  fi
+
+  compactions="$(grep -c '"hook_event_name"' "$record")"
+
+  if grep -q "\"trigger\":\"auto\",\"custom_instructions\":\"[^\"]*$marker" "$record"; then
+    echo "== passed: an automatic compaction used the proposed instructions ($compactions compactions ran)"
+  else
+    echo "== failed: $compactions compactions ran, and none got the proposed instructions:"
+    grep -o '"trigger":"[a-z]*","custom_instructions":.\{0,120\}' "$record"
+    return 1
+  fi
 }
 
-if [ ! -s "$record" ]; then
-  echo "== failed: no automatic compaction ran. The session answered:"
-  cat "$work/answer.txt"
-  exit 1
-fi
+echo "== live check on Claude Code $(claude --version | cut -d' ' -f1): two headless sessions, about two minutes"
 
-compactions="$(grep -c '"hook_event_name"' "$record")"
+failed=0
+echo "== 1 of 2: background tasks"
+check_tasks || failed=1
+echo "== 2 of 2: the backup"
+check_backup || failed=1
 
-if grep -q "\"trigger\":\"auto\",\"custom_instructions\":\"[^\"]*$marker" "$record"; then
-  echo "== passed: an automatic compaction used the proposed instructions ($compactions compactions ran)"
-else
-  echo "== failed: $compactions compactions ran, and none got the proposed instructions:"
-  grep -o '"trigger":"[a-z]*","custom_instructions":.\{0,120\}' "$record"
-  exit 1
-fi
+exit "$failed"

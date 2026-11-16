@@ -17,6 +17,7 @@ import type { Gauge } from '../types'
 import {
   COMMAND,
   INSTRUCTIONS_DESCRIPTION,
+  MAX_TASKS,
   PRECOMPUTE_SKIP,
   RESUME_PROMPT,
   STALE_NOTE,
@@ -27,6 +28,7 @@ import {
   cleanInstructions,
   compactLine,
   configOf,
+  endedIn,
   gaugeOf,
   greetingText,
   hasShrunk,
@@ -36,12 +38,14 @@ import {
   nudgeText,
   refusalOf,
   reportText,
+  runningOf,
   statusText,
+  stoppedOf,
   storedText,
+  taskOf,
   toastText,
-  unfinishedOf,
 } from './logic'
-import type { Config } from './logic'
+import type { Config, Task } from './logic'
 
 type Engine = EngineInterface
 
@@ -75,6 +79,38 @@ let senseStartedAt: number | undefined
 let engineVersion: string | undefined
 let versionNote: string | undefined
 let lastError: string | undefined
+
+/**
+ * The background commands, workflows and monitors that the main conversation
+ * started, and whose end the mod has not seen. The engine has no list of them
+ * to read, so the mod keeps its own. They live as long as this process, and so
+ * does the list: a compaction and a /clear leave both as they are.
+ */
+const tasks = new Map<string, Task>()
+
+/** Notes the background task a tool call started, and forgets one it stopped. */
+function track(call: unknown, result: unknown): void {
+  const started = taskOf(call, result)
+
+  if (started !== undefined) {
+    tasks.delete(started.id)
+    tasks.set(started.id, started)
+
+    for (const oldest of tasks.keys()) {
+      if (tasks.size <= MAX_TASKS) {
+        break
+      }
+
+      tasks.delete(oldest)
+    }
+  }
+
+  const stopped = stoppedOf(call, result)
+
+  if (stopped !== undefined) {
+    tasks.delete(stopped)
+  }
+}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -400,13 +436,16 @@ export const register: Register = (on, options) => {
   })
 
   // Sense after every tool call of the main conversation, and hand the model
-  // the nudge with the tool's result.
+  // the nudge with the tool's result. A subagent's background task is left
+  // out: it reports to the subagent.
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
 
     if (e.agentId !== undefined || OWN_TOOL.test(e.tool) || ran.deny !== undefined) {
       return ran
     }
+
+    track(e, ran.result)
 
     const note = await guarded($, 'tool.call', () => sense($, config), next.signal)
 
@@ -435,14 +474,13 @@ export const register: Register = (on, options) => {
         isHandedOver: false,
       }))
       await update($, isRowHidden, () => false)
-      // The agents whose reports are still to come: the model is told, so that
-      // its instructions can cover them. A list that fails holds nothing back.
-      const unfinished = await guarded($, 'the agent list', async () =>
-        unfinishedOf(await $.agent.list()),
-      )
+      // What is still running and may report later: the model is told, so
+      // that its instructions can cover it. A list that fails holds nothing back.
+      const agents = await guarded($, 'the agent list', () => $.agent.list())
+      const running = runningOf(agents ?? [], [...tasks.values()])
       await show($, reading)
 
-      return { result: storedText(reading, config.isUnattended, unfinished ?? []) }
+      return { result: storedText(reading, config.isUnattended, running) }
     } catch (error) {
       return { deny: `compact-warning could not store the proposal: ${messageOf(error)}` }
     }
@@ -456,6 +494,13 @@ export const register: Register = (on, options) => {
   }))
 
   on('prompt.submit', async ($, e, next) => {
+    // A background task that reports its end is no longer running.
+    if (e.origin.kind === 'task-notification') {
+      for (const id of endedIn(e.text)) {
+        tasks.delete(id)
+      }
+    }
+
     if (e.command !== undefined || e.isMeta === true) {
       return next(e)
     }

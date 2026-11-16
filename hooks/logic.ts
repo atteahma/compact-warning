@@ -158,8 +158,13 @@ export function compactLine(instructions: string): string {
   return `/compact ${instructions}`
 }
 
-/** The most agents the tool's answer names one by one. */
-export const MAX_NAMED_AGENTS = 10
+/** The most agents and tasks the tool's answer names one by one. */
+export const MAX_NAMED = 10
+
+/** The most background tasks the mod keeps track of; past it, the oldest goes. */
+export const MAX_TASKS = 50
+
+const LABEL_LENGTH = 60
 
 /** True while the agent's loop is still at work, so its report is still to come. */
 export function isUnfinished(status: AgentStatus): boolean {
@@ -190,35 +195,133 @@ export function unfinishedOf(agents: readonly AgentInfo[]): AgentInfo[] {
   return agents.filter(agent => agent.parentId === undefined && isUnfinished(agent.status))
 }
 
-/** What the tool's answer says about the unfinished agents; empty for none. */
-export function unfinishedText(unfinished: readonly AgentInfo[]): string {
-  if (unfinished.length === 0) {
+export type TaskKind = 'command' | 'workflow' | 'monitor'
+
+/** A background task the main conversation started, as a tool's result named it. */
+export type Task = {
+  /** The task's id, as its notification names it. */
+  id: string
+  kind: TaskKind
+  /** What it runs, in one short line; empty when the call did not say. */
+  label: string
+}
+
+function field(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null
+    ? (value as Readonly<Record<string, unknown>>)[key]
+    : undefined
+}
+
+/** The first line of a text, cut to the length of a label; empty for none. */
+function labelOf(...candidates: unknown[]): string {
+  const text = candidates.find(each => typeof each === 'string' && each.trim() !== '')
+  const line = typeof text === 'string' ? (text.trim().split('\n')[0] ?? '') : ''
+
+  return line.length > LABEL_LENGTH ? `${line.slice(0, LABEL_LENGTH - 1)}…` : line
+}
+
+/**
+ * The background task a tool call started, read from the call and its result;
+ * undefined when it started none that can report later.
+ */
+export function taskOf(call: unknown, result: unknown): Task | undefined {
+  const command = field(result, 'backgroundTaskId')
+
+  // A command of any shell tool, sent or moved to the background. One that is
+  // ended at the final response sends no notification.
+  if (typeof command === 'string') {
+    return field(result, 'backgroundEndsWithFinalResponse') === true
+      ? undefined
+      : { id: command, kind: 'command', label: labelOf(field(call, 'description'), field(call, 'command')) }
+  }
+
+  const id = field(result, 'taskId')
+  const tool = field(call, 'tool')
+
+  if (typeof id !== 'string') {
+    return undefined
+  }
+
+  if (tool === 'Workflow') {
+    return { id, kind: 'workflow', label: labelOf(field(result, 'workflowName')) }
+  }
+
+  if (tool === 'Monitor') {
+    return { id, kind: 'monitor', label: labelOf(field(call, 'description')) }
+  }
+
+  return undefined
+}
+
+/** The id of the task a TaskStop call stopped; undefined for any other call. */
+export function stoppedOf(call: unknown, result: unknown): string | undefined {
+  const id = field(result, 'task_id')
+
+  return field(call, 'tool') === 'TaskStop' && typeof id === 'string' ? id : undefined
+}
+
+const NOTIFICATION_END = '</task-notification>'
+const TASK_ID = /<task-id>([^<]+)<\/task-id>/
+const TASK_STATUS = /<status>([^<]+)<\/status>/
+/** The words a notification uses for a task that is over. */
+const ENDED: ReadonlySet<string> = new Set(['completed', 'failed', 'killed', 'cancelled', 'stopped'])
+
+/**
+ * The ids of the tasks that a task notification reports as over. A
+ * notification without such a status (a monitor's event) ends nothing.
+ */
+export function endedIn(text: string): string[] {
+  return text.split(NOTIFICATION_END).flatMap(part => {
+    const id = TASK_ID.exec(part)?.[1]?.trim()
+    const status = TASK_STATUS.exec(part)?.[1]?.trim()
+
+    return id !== undefined && status !== undefined && ENDED.has(status) ? [id] : []
+  })
+}
+
+function agentName(agent: AgentInfo): string {
+  return `agent "${agent.description}" (${agent.type}, id ${agent.id})`
+}
+
+function taskName(task: Task): string {
+  return task.label === ''
+    ? `${task.kind} (id ${task.id})`
+    : `${task.kind} "${task.label}" (id ${task.id})`
+}
+
+/**
+ * What is still running beside the main conversation, each as the tool's
+ * answer names it: the unfinished agents, then the tasks with no end seen.
+ */
+export function runningOf(agents: readonly AgentInfo[], tasks: readonly Task[]): string[] {
+  return [...unfinishedOf(agents).map(agentName), ...tasks.map(taskName)]
+}
+
+/** What the tool's answer says about what is still running; empty for nothing. */
+export function runningText(running: readonly string[]): string {
+  if (running.length === 0) {
     return ''
   }
 
-  const named = unfinished
-    .slice(0, MAX_NAMED_AGENTS)
-    .map(agent => `"${agent.description}" (${agent.type}, id ${agent.id})`)
-    .join('; ')
-  const rest = unfinished.length - MAX_NAMED_AGENTS
+  const rest = running.length - MAX_NAMED
   const more = rest > 0 ? `; and ${rest} more` : ''
 
-  return ` Agents that have not finished: ${named}${more}. Each one may report after the compaction, to a conversation that no longer holds its task. If your instructions do not say what each one is doing and what to do with its report, call this tool again with instructions that do.`
+  return ` Still running, as far as the mod can tell: ${running.slice(0, MAX_NAMED).join('; ')}${more}. Each one may report after the compaction, to a conversation that no longer holds its task. If your instructions do not say what each one is doing and what to do with its report, call this tool again with instructions that do.`
 }
 
 /** The tool's answer: the proposal is stored, and what the model does next. */
 export function storedText(
   gauge: Gauge | null,
   isUnattended: boolean,
-  unfinished: readonly AgentInfo[],
+  running: readonly string[],
 ): string {
   const at = gauge === null ? '' : ` The context is at ${where(gauge)}.`
-  const end = unfinished.length === 0 ? 'End your turn now' : 'Then end your turn'
+  const end = running.length === 0 ? 'End your turn now' : 'Then end your turn'
   const then = isUnattended
     ? `${end}. The mod compacts the conversation with these instructions when the turn ends, then sends you a prompt to continue.`
     : `${end}, with one or two lines for the user. The mod puts the /compact line with these instructions in the prompt box, and the user presses Enter. An automatic compaction uses them too.`
 
-  return `Stored.${at}${unfinishedText(unfinished)} ${then}`
+  return `Stored.${at}${runningText(running)} ${then}`
 }
 
 /** Why the mod refuses a summary that the engine wants to compute ahead of time. */

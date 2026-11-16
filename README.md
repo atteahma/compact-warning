@@ -27,9 +27,9 @@ auto-compaction fires, about 967 000 on a 1M window.
   the proposal.
 - **The mod never blocks a compaction.** After a compaction, a `/clear` or a rewind, it
   starts over.
-- **Agents that have not finished are named.** If a subagent is still at work when the
-  model proposes, the tool's answer lists it. The model can then propose again with
-  instructions that say what to do with its report.
+- **What is still running is named.** If a subagent, a background command, a workflow or
+  a monitor is still at work when the model proposes, the tool's answer lists it. The
+  model can then propose again with instructions that say what to do with its report.
 
 The rule `docs/compact-breakpoint.md` tells the model what a good breakpoint is and what
 the instructions must say.
@@ -143,7 +143,7 @@ Run `tools/check`. For proof from a real session, also run `tools/live-check`.
 | Script | What it does | Cost |
 |---|---|---|
 | `tools/check` | Runs `claude plugin validate`, the type check and the tests against the installed Claude Code. When they pass, it records the version, and the mod stops reporting itself as untested. | A few seconds, free |
-| `tools/live-check` | Tests the backup. A headless Haiku session proposes a compaction, then reads a large file until Claude Code compacts by itself. The check passes when that compaction received the proposal. | About a minute, a few cents |
+| `tools/live-check` | Runs two headless Haiku sessions. The first starts a background command and proposes twice: the tool must name the command while it runs, and not after it ended. The second proposes a compaction, then reads a large file until Claude Code compacts by itself: that compaction must receive the proposal. | About two minutes, a few cents |
 
 The type check needs `npx`, and the API types of the installed version in
 `.claude-plugin/types/`. `tools/check` says when the types are missing or old. To refresh
@@ -154,8 +154,19 @@ them, run `claude --plugin-dir .` in this folder once and exit.
 - **A session that never reaches a breakpoint.** The mod cannot pick one, for example
   during one command that runs for an hour while the context fills from other sources.
 - **Subagents.** The mod does not protect a subagent's own context. Subagents compact by
-  themselves. The mod also never waits for a subagent: a compaction can run while one is
-  still at work, and its report then arrives in the compacted conversation.
+  themselves.
+- **Work that is still running.** The mod never waits for a subagent or a background
+  task: a compaction can run while one is still at work, and its report then arrives in
+  the compacted conversation. The mod names what is still running, and the model's
+  instructions must cover it.
+- **The mod's own list of background tasks.** Claude Code gives a mod a list of the
+  session's agents, but none of its background commands, workflows and monitors. The mod
+  keeps its own list from the tool results that start them and the notifications that end
+  them. Two things follow:
+  - The list starts empty when the mod loads, so it misses a task started before that.
+  - Claude Code does not document the text of a notification. If an update changes it, a
+    finished task stays listed as still running. `tools/check` cannot see that, and
+    `tools/live-check` can.
 - **Slower compaction.** Claude Code can compute a summary ahead of time and reuse it. Such
   a summary cannot follow instructions written later, so the mod refuses it for the main
   conversation. A compaction then writes its summary when it runs, which takes longer.
@@ -182,8 +193,8 @@ The mod is TypeScript on Claude Code's mod API.
 | Hook event | What the mod does there |
 |---|---|
 | `session.start` | Registers the tool and the command, runs the start check, shows the green line. |
-| `tool.call` | Reads the context after each tool, and adds a nudge to the result. Skips subagents. |
-| `prompt.submit` | Does the same at a prompt, and reminds the model while a proposal waits. |
+| `tool.call` | Reads the context after each tool, and adds a nudge to the result. Notes the background tasks that tools start. Skips subagents. |
+| `prompt.submit` | Does the same at a prompt, and reminds the model while a proposal waits. Forgets a background task when its notification says it ended. |
 | `turn.complete` | Hands the proposal over: fills the prompt box, or compacts when `unattended` is on. |
 | `session.compact` | Passes the proposal on when you typed no instructions. Refuses a summary computed ahead of time. Clears the state afterwards. |
 | `session.end` | Clears the state on `/clear`. |

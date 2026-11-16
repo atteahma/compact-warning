@@ -3,11 +3,12 @@ import type { AgentInfo, AgentStatus } from 'claude-code'
 
 import {
   MAX_INSTRUCTIONS,
-  MAX_NAMED_AGENTS,
+  MAX_NAMED,
   ageOf,
   cleanInstructions,
   compactLine,
   configOf,
+  endedIn,
   gaugeOf,
   greetingText,
   hasShrunk,
@@ -18,11 +19,15 @@ import {
   levelOf,
   nudgeText,
   refusalOf,
+  runningOf,
+  runningText,
   statusText,
+  stoppedOf,
   storedText,
+  taskOf,
   unfinishedOf,
-  unfinishedText,
 } from '../hooks/logic'
+import type { Task } from '../hooks/logic'
 
 test('the options default to 80 and 88, attended', () => {
   expect(configOf({})).toEqual({ warnPercent: 80, stopPercent: 88, isUnattended: false })
@@ -176,16 +181,71 @@ test('only the agents that report to the main conversation are kept', () => {
   expect(kept.map(each => each.id)).toEqual(['a1', 'a4'])
 })
 
-test('the stored answer names the unfinished agents, and counts those past ten', () => {
-  expect(unfinishedText([])).toBe('')
-  expect(storedText(null, false, [])).toContain('Stored. End your turn now, with')
-  expect(storedText(null, true, [agent('a1', 'running')])).toContain(
-    'Stored. Agents that have not finished: "Task a1" (Explore, id a1). Each one may report',
+test('a tool result that starts a background task names it', () => {
+  expect(
+    taskOf(
+      { tool: 'Bash', command: 'npm run build\nnpm test', description: 'Build the site' },
+      { backgroundTaskId: 'b1' },
+    ),
+  ).toEqual({ id: 'b1', kind: 'command', label: 'Build the site' })
+  expect(taskOf({ tool: 'Bash', command: 'npm run build\nnpm test' }, { backgroundTaskId: 'b1' })?.label).toBe(
+    'npm run build',
   )
-  expect(storedText(null, true, [agent('a1', 'running')])).toContain('Then end your turn. The mod compacts')
+  expect(taskOf({ tool: 'Bash', command: 'x'.repeat(200) }, { backgroundTaskId: 'b1' })?.label.length).toBe(60)
+  expect(
+    taskOf({ tool: 'Workflow' }, { status: 'async_launched', taskId: 'w1', workflowName: 'review-changes' }),
+  ).toEqual({ id: 'w1', kind: 'workflow', label: 'review-changes' })
+  expect(taskOf({ tool: 'Monitor', description: 'Watch the deploy' }, { taskId: 'm1', timeoutMs: 0 })).toEqual({
+    id: 'm1',
+    kind: 'monitor',
+    label: 'Watch the deploy',
+  })
 
-  const many = Array.from({ length: MAX_NAMED_AGENTS + 2 }, (_, i) => agent(`a${i}`, 'running'))
-  const text = unfinishedText(many)
-  expect(text).toContain(`(Explore, id a${MAX_NAMED_AGENTS - 1}); and 2 more.`)
-  expect(text).not.toContain(`id a${MAX_NAMED_AGENTS})`)
+  // A foreground command, a command that is ended with the final response,
+  // and another tool's task id start nothing that reports later.
+  expect(taskOf({ tool: 'Bash', command: 'ls' }, { stdout: '' })).toBeUndefined()
+  expect(
+    taskOf({ tool: 'Bash', command: 'ls' }, { backgroundTaskId: 'b2', backgroundEndsWithFinalResponse: true }),
+  ).toBeUndefined()
+  expect(taskOf({ tool: 'TaskUpdate' }, { taskId: '7' })).toBeUndefined()
+  expect(taskOf({ tool: 'Bash' }, undefined)).toBeUndefined()
+})
+
+test('a stopped task and an ended task are told apart from a running one', () => {
+  expect(stoppedOf({ tool: 'TaskStop', task_id: 'b1' }, { message: 'Stopped', task_id: 'b1' })).toBe('b1')
+  expect(stoppedOf({ tool: 'Bash' }, { task_id: 'b1' })).toBeUndefined()
+
+  const notice = (id: string, status?: string): string =>
+    `<task-notification>\n<task-id>${id}</task-id>\n${status === undefined ? '' : `<status>${status}</status>\n`}<summary>Background command</summary>\n</task-notification>`
+
+  expect(endedIn(notice('b1', 'completed'))).toEqual(['b1'])
+  expect(endedIn(`${notice('b1', 'failed')}\n${notice('m1')}\n${notice('w1', 'killed')}`)).toEqual(['b1', 'w1'])
+  // An event of a monitor that goes on, and a word that ends nothing.
+  expect(endedIn(notice('m1'))).toEqual([])
+  expect(endedIn(notice('m1', 'running'))).toEqual([])
+  expect(endedIn('go on')).toEqual([])
+})
+
+test('the stored answer names what is still running, and counts what is past ten', () => {
+  const tasks: Task[] = [
+    { id: 'b1', kind: 'command', label: 'Build the site' },
+    { id: 'm1', kind: 'monitor', label: '' },
+  ]
+
+  expect(runningOf([agent('a1', 'running'), agent('a2', 'completed')], tasks)).toEqual([
+    'agent "Task a1" (Explore, id a1)',
+    'command "Build the site" (id b1)',
+    'monitor (id m1)',
+  ])
+  expect(runningText([])).toBe('')
+  expect(storedText(null, false, [])).toContain('Stored. End your turn now, with')
+  expect(storedText(null, true, ['monitor (id m1)'])).toContain(
+    'Stored. Still running, as far as the mod can tell: monitor (id m1). Each one may report',
+  )
+  expect(storedText(null, true, ['monitor (id m1)'])).toContain('Then end your turn. The mod compacts')
+
+  const many = Array.from({ length: MAX_NAMED + 2 }, (_, i) => `monitor (id m${i})`)
+  const text = runningText(many)
+  expect(text).toContain(`monitor (id m${MAX_NAMED - 1}); and 2 more.`)
+  expect(text).not.toContain(`(id m${MAX_NAMED})`)
 })
