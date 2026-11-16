@@ -112,6 +112,12 @@ const TURN_END = {
   isAborted: false,
   turnId: 't1',
 } as const
+const STATUS_COMMAND = {
+  command: 'compact-warning',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: true, columns: 120 },
+} as const
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hello', toolUses: [] }]
 const last = (list: readonly string[]): string => list[list.length - 1] ?? ''
 
@@ -119,14 +125,115 @@ const last = (list: readonly string[]): string => list[list.length - 1] ?? ''
 const propose = ($: Engine, instructions: string) =>
   $.tool.call({ tool: TOOL, instructions } as never)
 
-test('under the first threshold a tool call carries no note', async ($, on) => {
+/** Draws the mod's row above the prompt, as a surface does. */
+const band = ($: Engine, surface: 'terminal' | 'desktop' = 'terminal') =>
+  $.ui.mount({
+    plugin: 'compact-warning',
+    component: 'AbovePrompt',
+    surface,
+    props: {
+      hasSurvey: false,
+      isCollapsed: false,
+      isWorking: false,
+      maxRows: 10,
+      bodyColumns: 100,
+      scroll: { offset: 0, bodyRows: 10 },
+      view: {},
+    },
+  })
+
+/** The green line of a passed start check, when the row above the prompt has it. */
+async function greenLine($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
+  const ui = await band($, surface)
+  const line = await ui.find({ type: 'Text', text: /compact-warning is working/ })
+  await ui.unmount()
+
+  return line
+}
+
+test('under the first threshold a tool call carries no note, and no status line shows', async ($, on) => {
   const w = world(on, { tokens: at(42) })
   await $.session.start(START)
   const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
 
   expect(ran.context ?? []).toEqual([])
-  expect(last(w.statuses)).toBe('context 42% of auto-compact')
+  expect(w.statuses.every(text => text === '')).toBe(true)
   expect(w.toasts).toEqual([])
+})
+
+test('a passed start check shows a green line for a few seconds', async ($, on) => {
+  const clock = mock.clock(on)
+  world(on, { tokens: at(12) })
+  await $.session.start(START)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const line = await greenLine($, surface)
+
+    expect(line?.text).toBe(
+      '✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens). The context is at 12% now.',
+    )
+    expect(line?.props['color']).toBe('success')
+  }
+
+  await clock.advance(9000)
+  expect(await greenLine($)).toBeDefined()
+
+  await clock.advance(1000)
+  expect(await greenLine($)).toBeUndefined()
+})
+
+test('the green line shows before the first response, and leaves at the first prompt', async ($, on) => {
+  mock.clock(on)
+  world(on)
+  await $.session.start(START)
+
+  expect((await greenLine($))?.text).toBe(
+    '✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens).',
+  )
+
+  await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+  expect(await greenLine($)).toBeUndefined()
+})
+
+test('a start check that fails shows no green line', async ($, on) => {
+  mock.clock(on)
+  const untested = world(on, { tokens: at(12), tested: '2.1.300' })
+  await $.session.start(START)
+
+  expect(await greenLine($)).toBeUndefined()
+  expect(last(untested.statuses)).toContain('mod untested on Claude Code')
+})
+
+test('a broken context reading fails the start check', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { isUsageBroken: true })
+  await $.session.start(START)
+
+  expect(await greenLine($)).toBeUndefined()
+  expect(last(w.statuses)).toContain('error in session.start:')
+})
+
+test('a session with nobody at the prompt gets no green line', async ($, on) => {
+  mock.clock(on)
+  world(on, { tokens: at(12) })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+
+  expect(await greenLine($)).toBeUndefined()
+})
+
+test('/compact-warning runs the checks again and prints the verdict', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: at(12), tested: '2.1.300' })
+  await $.session.start(START)
+
+  const before = await $.command.run(STATUS_COMMAND)
+  expect(before.text).toContain('Health: needs attention. The mod has not passed its tests')
+
+  // tools/check passed in the meantime: the command reads the file again.
+  w.tested = VERSION
+  const after = await $.command.run(STATUS_COMMAND)
+  expect(after.text).toContain('Health: working.')
+  expect(last(w.statuses)).toBe('')
 })
 
 test('each threshold is told once, with the tool result', async ($, on) => {
@@ -191,22 +298,11 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
   expect(w.fills.length).toBe(1)
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({
-      plugin: 'compact-warning',
-      component: 'AbovePrompt',
-      surface,
-      props: {
-        hasSurvey: false,
-        isCollapsed: false,
-        isWorking: false,
-        maxRows: 10,
-        bodyColumns: 100,
-        scroll: { offset: 0, bodyRows: 10 },
-        view: {},
-      },
-    })
+    const ui = await band($, surface)
 
     expect(await ui.find({ type: 'Text', text: /Ready to compact \(85%/ })).toBeDefined()
+    // The proposal has the row: the green line of the start check gives way.
+    expect(await ui.find({ type: 'Text', text: /is working/ })).toBeUndefined()
     await ui.press({ key: 'fill' })
     await ui.unmount()
   }

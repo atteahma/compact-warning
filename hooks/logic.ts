@@ -178,23 +178,63 @@ export type Status = {
   lastError: string | undefined
 }
 
-/** The line under the prompt: always there while the mod runs. */
-export function statusText(status: Status): string {
+/**
+ * The line under the prompt, or undefined for none. The engine draws it as a
+ * warning, so it is there only when there is something to act on: a threshold
+ * was crossed, a /compact line waits, or the mod has a fault.
+ */
+export function statusText(status: Status): string | undefined {
   const { gauge, told, hasProposal, age, versionNote, lastError } = status
-  // The engine draws the mod's name in front of this text.
-  const fill = gauge === null ? 'on' : `context ${gauge.percent}% of auto-compact`
   const old = age < STALE_TOKENS ? '' : `, ${ageText(age)} old`
   const state = hasProposal
-    ? `, /compact line ready${old}`
+    ? `/compact line ready${old}`
     : told === 'stop'
-      ? ', stopping at the next breakpoint'
+      ? 'stopping at the next breakpoint'
       : told === 'warn'
-        ? ', looking for a breakpoint'
-        : ''
-  const version = versionNote === undefined ? '' : ` · mod ${versionNote}`
-  const error = lastError === undefined ? '' : ` · mod error in ${lastError}`
+        ? 'looking for a breakpoint'
+        : undefined
 
-  return `${fill}${state}${version}${error}`
+  if (state === undefined && versionNote === undefined && lastError === undefined) {
+    return undefined
+  }
+
+  // The engine draws the mod's name in front of this text.
+  const fill = gauge === null ? undefined : `context ${gauge.percent}% of auto-compact`
+  const head = [fill, state].filter(part => part !== undefined).join(', ')
+  const version = versionNote === undefined ? undefined : `mod ${versionNote}`
+  const error = lastError === undefined ? undefined : `mod error in ${lastError}`
+
+  return [head, version, error].filter(part => part !== undefined && part !== '').join(' · ')
+}
+
+function thresholds(config: Config): string {
+  return config.warnPercent === config.stopPercent
+    ? `${config.warnPercent}%`
+    : `${config.warnPercent}% and ${config.stopPercent}%`
+}
+
+/** The green line above the prompt once the start check has passed. */
+export function greetingText(gauge: Gauge | null, limit: number, config: Config): string {
+  const now = gauge === null ? '' : ` The context is at ${gauge.percent}% now.`
+
+  return `✓ compact-warning is working. It warns at ${thresholds(config)} of the auto-compaction point (${count(limit)} tokens).${now}`
+}
+
+/** The first line of the report: the verdict of the checks. */
+export function healthText(
+  engineVersion: string | undefined,
+  versionNote: string | undefined,
+  lastError: string | undefined,
+): string {
+  if (lastError !== undefined) {
+    return `Health: needs attention. A hook of the mod failed in ${lastError}.`
+  }
+
+  if (versionNote !== undefined) {
+    return `Health: needs attention. The mod has not passed its tests on Claude Code ${engineVersion ?? 'this version'}. Run tools/check in its folder.`
+  }
+
+  return 'Health: working. The version is tested, the context reading answers, and no hook has failed.'
 }
 
 export type Report = {
@@ -228,6 +268,7 @@ export function reportText(report: Report): string {
       : `stored, ${proposal.isHandedOver ? 'offered to you' : 'not offered yet'}${old}:\n${proposal.instructions}`
 
   return [
+    healthText(engineVersion, versionNote, lastError),
     `Running on Claude Code ${version}: ${tested}.`,
     `Context: ${context}.`,
     `Nudges: look for a breakpoint at ${config.warnPercent}%, stop at ${config.stopPercent}%. Given so far: ${TOLD_WORDS[told]}.`,

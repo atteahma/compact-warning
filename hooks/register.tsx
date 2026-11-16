@@ -5,6 +5,10 @@
 // Every hook passes the event on unchanged when its own work fails: the
 // session then falls back to plain auto-compaction, and the failure shows in
 // the status line under the prompt.
+//
+// The engine draws the status line as a warning, so the mod shows one only
+// from the first threshold on, or for a fault. At the start of a session a
+// green line above the prompt says for a few seconds that the checks passed.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -23,6 +27,7 @@ import {
   compactLine,
   configOf,
   gaugeOf,
+  greetingText,
   hasShrunk,
   instructionsFor,
   isStronger,
@@ -46,6 +51,7 @@ const told = atom({ plugin: 'compact-warning', key: 'told' } as const, 'none')
 const proposal = atom({ plugin: 'compact-warning', key: 'proposal' } as const, null)
 const gauge = atom({ plugin: 'compact-warning', key: 'gauge' } as const, null)
 const isRowHidden = atom({ plugin: 'compact-warning', key: 'isRowHidden' } as const, false)
+const greeting = atom({ plugin: 'compact-warning', key: 'greeting' } as const, null)
 
 /** The file tools/check writes: the Claude Code version the tests passed on. */
 const TESTED_VERSION_FILE = 'tested-version.txt'
@@ -58,6 +64,8 @@ const SENSE_STALE_MS = 30 * 1000
 /** The wait between the end of a turn and an unattended compaction. */
 const UNATTENDED_DELAY_MS = 500
 const LONG_TOAST_MS = 10 * 1000
+/** How long the green line of a passed start check stays above the prompt. */
+const GREETING_MS = 10 * 1000
 const ERROR_LENGTH = 160
 
 let limitCache: { window: number; limit: number; at: number } | undefined
@@ -160,6 +168,39 @@ async function refresh($: Engine): Promise<void> {
 }
 
 /**
+ * The deep reading for a health check: unlike `measure`, it reads the
+ * auto-compaction point afresh, and also before the first response.
+ */
+async function inspect($: Engine): Promise<{ reading: Gauge | null; limit: number }> {
+  limitCache = undefined
+  const { context } = await $.session.usage()
+  const limit = await limitOf($, context.window)
+
+  return {
+    reading: context.tokens === undefined ? null : gaugeOf(context.tokens, limit),
+    limit,
+  }
+}
+
+/** Takes the green line away: all of them, or only the one that ends at `until`. */
+async function endGreeting($: Engine, until?: number): Promise<void> {
+  const held = await read($, greeting)
+
+  if (held !== null && (until === undefined || held.until === until)) {
+    await update($, greeting, () => null)
+  }
+}
+
+/** Shows the green line that says the start check passed, for a few seconds. */
+async function greet($: Engine, text: string): Promise<void> {
+  const until = Date.now() + GREETING_MS
+  await update($, greeting, () => ({ text, until }))
+  $.clock.after(GREETING_MS, () => {
+    void guarded($, 'the start check', () => endGreeting($, until))
+  })
+}
+
+/**
  * Reads the fill and answers the note for the model when it has crossed a
  * threshold it was not told about yet. Of several calls at once, one reads.
  */
@@ -210,6 +251,8 @@ async function sense($: Engine, config: Config): Promise<string | undefined> {
 }
 
 async function notesAtPrompt($: Engine, config: Config): Promise<string[]> {
+  // The person is at the prompt and has seen the green line.
+  await endGreeting($)
   const note = await sense($, config)
   const stored = await read($, proposal)
   const notes = note === undefined ? [] : [note]
@@ -321,8 +364,12 @@ async function checkVersion($: Engine): Promise<void> {
 export const register: Register = (on, options) => {
   const config = configOf(options)
 
+  // The start of a new or resumed session, and a reload of the mod. This is
+  // also the health check: each step below is a part the mod relies on, and
+  // the green line shows only when every one answered.
   on('session.start', async ($, e, next) => {
     await guarded($, 'session.start', async () => {
+      await update($, greeting, () => null)
       await $.tool.register({
         name: TOOL_NAME,
         description: TOOL_DESCRIPTION,
@@ -339,7 +386,12 @@ export const register: Register = (on, options) => {
         description: 'Show how close this session is to auto-compaction',
       })
       await checkVersion($)
-      await refresh($)
+      const { reading, limit } = await inspect($)
+      await show($, reading)
+
+      if (e.isInteractive && versionNote === undefined && lastError === undefined) {
+        await greet($, greetingText(reading, limit, config))
+      }
     })
 
     return next(e)
@@ -474,8 +526,10 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: COMMAND }, async $ => {
+    // The health check on demand: the same readings as at the start.
     const text = await guarded($, 'the status command', async () => {
-      const reading = await measure($)
+      await checkVersion($)
+      const { reading } = await inspect($)
       await show($, reading)
 
       return reportText({
@@ -493,12 +547,28 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const stored = await read($, proposal)
-    const isQuiet =
-      e.props.hasSurvey || stored === null || !stored.isHandedOver || (await read($, isRowHidden))
-
-    if (isQuiet) {
+    if (e.props.hasSurvey) {
       return next(e)
+    }
+
+    const stored = await read($, proposal)
+    const isOffered = stored !== null && stored.isHandedOver && !(await read($, isRowHidden))
+
+    // No proposal waits: the row is free for the green line of the start check.
+    if (!isOffered) {
+      const hello = await read($, greeting)
+
+      if (hello === null || Date.now() >= hello.until) {
+        return next(e)
+      }
+
+      const { Box, Text } = $.ui.resolve(e)
+
+      return (
+        <Box>
+          <Text color="success">{hello.text}</Text>
+        </Box>
+      )
     }
 
     const reading = await read($, gauge)

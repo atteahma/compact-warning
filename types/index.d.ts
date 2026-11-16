@@ -21,6 +21,13 @@ export type Gauge = {
   percent: number
 }
 
+/** The line that says the start check passed, shown for a few seconds. */
+export type Greeting = {
+  text: string
+  /** When the line leaves, in milliseconds since the epoch. */
+  until: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'compact-warning': {
@@ -28,6 +35,7 @@ declare module 'claude-code' {
       proposal: Proposal | null
       gauge: Gauge | null
       isRowHidden: boolean
+      greeting: Greeting | null
     }
   }
 }

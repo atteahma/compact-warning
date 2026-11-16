@@ -42,22 +42,36 @@ Press Enter soon after the line appears.
 
 | Where | What |
 |---|---|
-| Status line under the prompt | `compact-warning: context 42% of auto-compact`, always. It adds `looking for a breakpoint`, `stopping at the next breakpoint` or `/compact line ready`, and the proposal's age once it is old. Before the first reading it says `on`. |
+| Green line above the prompt | `✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens).` It shows for 10 seconds when the start check passed, and leaves at your first prompt. |
+| Status line under the prompt | Only from the first threshold on, because Claude Code draws it as a warning: `compact-warning: context 82% of auto-compact, looking for a breakpoint`. Later it says `stopping at the next breakpoint` or `/compact line ready`, and the proposal's age once it is old. |
 | Toast | One at each nudge, and one when the `/compact` line is ready. |
 | Row above the prompt | "Ready to compact", with the buttons **Fill prompt** and **Hide**, while a proposal waits. |
-| `/compact-warning` | Prints the reading, the thresholds, the stored proposal and the last error. |
+| `/compact-warning` | Runs the checks again. Prints the verdict, the reading, the thresholds, the stored proposal and the last error. |
 
-### If the mod stops working
+### How you know the mod works
 
 The mod uses an early-access part of Claude Code that can change with any update. Claude
 Code skips a mod that fails, and in a normal session it reports that only in the debug log.
-So the mod shows its own health:
+So the mod checks itself when a session starts or resumes, and when `/reload-plugins` loads
+a change:
 
-- **No status line means the mod is not running.** Run `tools/check` (below).
+1. It registers its tool and its command.
+2. It compares the running Claude Code version with the one `tools/check` last passed on.
+3. It reads the context's size and the point where auto-compaction fires.
+
+What you see then:
+
+- **The green line** means every check passed.
+- **No green line** means the mod is not loaded or a check failed. Run `/compact-warning`.
+  If Claude Code does not know the command, the mod is not loaded: run `tools/check`
+  (below).
 - **`mod untested on Claude Code <version>`** in the status line means Claude Code was
   updated since the checks last passed. Run `tools/check`.
 - **`mod error in <hook>: <message>`** in the status line means a hook of the mod failed.
   The session still works, with plain auto-compaction.
+
+At any time, `/compact-warning` runs the checks again. Its first line is `Health: working`,
+or `Health: needs attention` with the reason.
 
 ## Install
 
@@ -122,13 +136,15 @@ in this folder once and exit.
 
 | Event | What the mod does there |
 |---|---|
-| `session.start` | Registers the tool and the command, compares versions, draws the status line. |
+| `session.start` | Registers the tool and the command, runs the start check, shows the green line. |
 | `tool.call` | Reads the fill after the tool ran, and adds the nudge to the result. Skips subagents. |
-| `prompt.submit` | The same at a prompt. Reminds the model while an offered proposal is unused. |
+| `prompt.submit` | The same at a prompt. Reminds the model while an offered proposal is unused. Takes the green line away. |
 | `turn.complete` | Offers the proposal: fills the prompt box, or compacts when `unattended` is on. |
 | `session.compact` | Passes the stored instructions on when none were typed. Clears the state afterwards. |
 | `session.end` | Clears the state on `/clear`. |
 | `session.measure` | Redraws the status line. |
+| `command.run` | Answers `/compact-warning`: runs the checks again and prints the report. |
+| `ui.render` | Draws the row above the prompt: the green line, or "Ready to compact". |
 
 Every hook passes its event on unchanged when the mod's own work fails.
 
@@ -140,3 +156,7 @@ Every hook passes its event on unchanged when the mod's own work fails.
 - A summary that Claude Code computed ahead of time may predate the proposal. The mod
   passes the instructions on at every compaction, but it cannot make the engine recompute.
 - The reading is the input size of the last response, so it lags by one step.
+- The green line and the "Ready to compact" row sit in the band above the prompt. While you
+  have collapsed that band (ctrl+x ctrl+a), neither shows.
+- The start check proves that the mod loaded and that its readings answer. It cannot prove
+  that a later hook will work: a failure there shows as `mod error` in the status line.

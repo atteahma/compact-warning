@@ -7,7 +7,9 @@ import {
   compactLine,
   configOf,
   gaugeOf,
+  greetingText,
   hasShrunk,
+  healthText,
   instructionsFor,
   isStronger,
   levelOf,
@@ -81,8 +83,9 @@ test('the status line says what the mod is doing', () => {
     lastError: undefined,
   } as const
 
-  expect(statusText({ ...base, gauge: null })).toBe('on')
-  expect(statusText({ ...base, gauge: gaugeOf(420, 1000) })).toBe('context 42% of auto-compact')
+  // Under the first threshold, with nothing wrong, there is no line at all.
+  expect(statusText({ ...base, gauge: null })).toBeUndefined()
+  expect(statusText({ ...base, gauge: gaugeOf(420, 1000) })).toBeUndefined()
   expect(statusText({ ...base, gauge: gaugeOf(820, 1000), told: 'warn' })).toBe(
     'context 82% of auto-compact, looking for a breakpoint',
   )
@@ -91,13 +94,41 @@ test('the status line says what the mod is doing', () => {
   )
   expect(
     statusText({ ...base, gauge: null, versionNote: 'untested on Claude Code 9.9.9' }),
-  ).toBe('on · mod untested on Claude Code 9.9.9')
+  ).toBe('mod untested on Claude Code 9.9.9')
   expect(statusText({ ...base, gauge: null, lastError: 'tool.call: boom' })).toBe(
-    'on · mod error in tool.call: boom',
+    'mod error in tool.call: boom',
   )
+  expect(
+    statusText({
+      ...base,
+      gauge: gaugeOf(420, 1000),
+      versionNote: 'untested on Claude Code 9.9.9',
+    }),
+  ).toBe('context 42% of auto-compact · mod untested on Claude Code 9.9.9')
   expect(
     statusText({ ...base, gauge: gaugeOf(900, 1000), hasProposal: true, age: 18_400 }),
   ).toBe('context 90% of auto-compact, /compact line ready, 18 000 tokens old')
+})
+
+test('the green line names the thresholds and the auto-compaction point', () => {
+  expect(greetingText(null, 967_000, configOf({}))).toBe(
+    '✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens).',
+  )
+  expect(
+    greetingText(gaugeOf(116_040, 967_000), 967_000, configOf({ warnPercent: 70, stopPercent: 70 })),
+  ).toBe(
+    '✓ compact-warning is working. It warns at 70% of the auto-compaction point (967 000 tokens). The context is at 12% now.',
+  )
+})
+
+test('the report opens with the verdict of the checks', () => {
+  expect(healthText('2.1.325', undefined, undefined)).toContain('Health: working.')
+  expect(healthText('9.9.9', 'untested on Claude Code 9.9.9', undefined)).toBe(
+    'Health: needs attention. The mod has not passed its tests on Claude Code 9.9.9. Run tools/check in its folder.',
+  )
+  expect(healthText('2.1.325', undefined, 'tool.call: boom')).toBe(
+    'Health: needs attention. A hook of the mod failed in tool.call: boom.',
+  )
 })
 
 test('old instructions reach the summary with a caveat', () => {
