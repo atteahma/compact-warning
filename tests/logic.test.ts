@@ -1,7 +1,9 @@
 import { expect, test } from 'claude-code/testing'
+import type { AgentInfo, AgentStatus } from 'claude-code'
 
 import {
   MAX_INSTRUCTIONS,
+  MAX_NAMED_AGENTS,
   ageOf,
   cleanInstructions,
   compactLine,
@@ -12,10 +14,14 @@ import {
   healthText,
   instructionsFor,
   isStronger,
+  isUnfinished,
   levelOf,
   nudgeText,
   refusalOf,
   statusText,
+  storedText,
+  unfinishedOf,
+  unfinishedText,
 } from '../hooks/logic'
 
 test('the options default to 80 and 88, attended', () => {
@@ -141,4 +147,45 @@ test('old instructions reach the summary with a caveat', () => {
   expect(instructionsFor(proposal, gaugeOf(820_300, 967_000))).toBe(
     'Keep the plan.\n\n(These instructions were written about 20 000 tokens of conversation ago. Where the later conversation differs from them, the later conversation wins.)',
   )
+})
+
+const agent = (id: string, status: AgentStatus, parentId?: string): AgentInfo => ({
+  id,
+  description: `Task ${id}`,
+  type: 'Explore',
+  status,
+  ...(parentId === undefined ? {} : { parentId }),
+})
+
+test('an agent is unfinished while its loop is at work', () => {
+  const statuses: AgentStatus[] = ['pending', 'running', 'waiting', 'idle', 'completed', 'failed', 'killed']
+
+  expect(statuses.filter(isUnfinished)).toEqual(['pending', 'running', 'waiting'])
+  // A status the types do not know yet counts: better one agent too many.
+  expect(isUnfinished('paused' as AgentStatus)).toBe(true)
+})
+
+test('only the agents that report to the main conversation are kept', () => {
+  const kept = unfinishedOf([
+    agent('a1', 'running'),
+    agent('a2', 'completed'),
+    agent('a3', 'running', 'a1'),
+    agent('a4', 'waiting'),
+  ])
+
+  expect(kept.map(each => each.id)).toEqual(['a1', 'a4'])
+})
+
+test('the stored answer names the unfinished agents, and counts those past ten', () => {
+  expect(unfinishedText([])).toBe('')
+  expect(storedText(null, false, [])).toContain('Stored. End your turn now, with')
+  expect(storedText(null, true, [agent('a1', 'running')])).toContain(
+    'Stored. Agents that have not finished: "Task a1" (Explore, id a1). Each one may report',
+  )
+  expect(storedText(null, true, [agent('a1', 'running')])).toContain('Then end your turn. The mod compacts')
+
+  const many = Array.from({ length: MAX_NAMED_AGENTS + 2 }, (_, i) => agent(`a${i}`, 'running'))
+  const text = unfinishedText(many)
+  expect(text).toContain(`(Explore, id a${MAX_NAMED_AGENTS - 1}); and 2 more.`)
+  expect(text).not.toContain(`id a${MAX_NAMED_AGENTS})`)
 })

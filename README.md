@@ -27,6 +27,9 @@ auto-compaction fires, about 967 000 on a 1M window.
   the proposal.
 - **The mod never blocks a compaction.** After a compaction, a `/clear` or a rewind, it
   starts over.
+- **Agents that have not finished are named.** If a subagent is still at work when the
+  model proposes, the tool's answer lists it. The model can then propose again with
+  instructions that say what to do with its report.
 
 The rule `docs/compact-breakpoint.md` tells the model what a good breakpoint is and what
 the instructions must say.
@@ -151,7 +154,8 @@ them, run `claude --plugin-dir .` in this folder once and exit.
 - **A session that never reaches a breakpoint.** The mod cannot pick one, for example
   during one command that runs for an hour while the context fills from other sources.
 - **Subagents.** The mod does not protect a subagent's own context. Subagents compact by
-  themselves.
+  themselves. The mod also never waits for a subagent: a compaction can run while one is
+  still at work, and its report then arrives in the compacted conversation.
 - **Slower compaction.** Claude Code can compute a summary ahead of time and reuse it. Such
   a summary cannot follow instructions written later, so the mod refuses it for the main
   conversation. A compaction then writes its summary when it runs, which takes longer.

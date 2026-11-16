@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On, SessionMessage, SessionUsage } from 'claude-code'
+import type { AgentInfo, On, SessionMessage, SessionUsage } from 'claude-code'
 
 const TOOL = 'mcp__compact-warning__propose_compact'
 const WINDOW = 1_000_000
@@ -18,6 +18,8 @@ type World = {
   draft: string
   tested: string | undefined
   isUsageBroken: boolean
+  agents: AgentInfo[]
+  isAgentListBroken: boolean
   statuses: string[]
   toasts: string[]
   fills: string[]
@@ -31,6 +33,8 @@ function world(on: On, start: Partial<World> = {}): World {
     draft: '',
     tested: VERSION,
     isUsageBroken: false,
+    agents: [],
+    isAgentListBroken: false,
     statuses: [],
     toasts: [],
     fills: [],
@@ -58,6 +62,13 @@ function world(on: On, start: Partial<World> = {}): World {
     }
 
     return { value: usage as unknown as SessionUsage }
+  })
+  on('agent.list', () => {
+    if (w.isAgentListBroken) {
+      throw new Error('the list is gone')
+    }
+
+    return { value: w.agents }
   })
   on('fs.read', () => {
     if (w.tested === undefined) {
@@ -286,6 +297,8 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
   const stored = await propose($, '  Keep the plan.  ')
 
   expect(String(stored.result)).toContain('Stored.')
+  expect(String(stored.result)).toContain('End your turn now')
+  expect(String(stored.result)).not.toContain('have not finished')
   expect(w.fills).toEqual([])
 
   await $.turn.complete(TURN_END)
@@ -308,6 +321,44 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
   }
 
   expect(w.fills.length).toBe(3)
+})
+
+test('a proposal names the agents that have not finished', async ($, on) => {
+  const w = world(on, {
+    tokens: at(85),
+    agents: [
+      { id: 'a1', description: 'Search the logs', type: 'Explore', status: 'running' },
+      { id: 'a2', description: 'Read the docs', type: 'Explore', status: 'completed' },
+      // Spawned by a1: it reports to a1, not to the main conversation.
+      { id: 'a3', description: 'Count the lines', type: 'Explore', status: 'running', parentId: 'a1' },
+    ],
+  })
+  await $.session.start(START)
+  const stored = await propose($, 'Keep the plan.')
+
+  expect(String(stored.result)).toContain(
+    'Agents that have not finished: "Search the logs" (Explore, id a1). Each one may report',
+  )
+  expect(String(stored.result)).toContain('Then end your turn, with one or two lines')
+  expect(String(stored.result)).not.toContain('a2')
+  expect(String(stored.result)).not.toContain('a3')
+
+  // The proposal is stored all the same.
+  await $.turn.complete(TURN_END)
+  expect(w.fills).toEqual(['/compact Keep the plan.'])
+})
+
+test('an agent list that fails holds no proposal back', async ($, on) => {
+  const w = world(on, { tokens: at(85), isAgentListBroken: true })
+  await $.session.start(START)
+  const stored = await propose($, 'Keep the plan.')
+
+  expect(String(stored.result)).toContain('Stored.')
+  expect(last(w.statuses)).toContain('mod error in the agent list:')
+  expect(w.toasts.join('\n')).toContain('The mod failed in the agent list')
+
+  await $.turn.complete(TURN_END)
+  expect(w.fills).toEqual(['/compact Keep the plan.'])
 })
 
 test('a draft the person is typing is kept', async ($, on) => {

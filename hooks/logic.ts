@@ -1,6 +1,8 @@
 // The mod's decisions and wording, with no engine calls: register.tsx wires
 // these to the session, and logic.test.ts checks them alone.
 
+import type { AgentInfo, AgentStatus } from 'claude-code'
+
 import type { Gauge, Proposal, Told } from '../types'
 
 export const TOOL_NAME = 'propose_compact'
@@ -156,13 +158,67 @@ export function compactLine(instructions: string): string {
   return `/compact ${instructions}`
 }
 
-export function storedText(gauge: Gauge | null, isUnattended: boolean): string {
-  const at = gauge === null ? '' : ` The context is at ${where(gauge)}.`
-  const then = isUnattended
-    ? 'End your turn now. The mod compacts the conversation with these instructions when the turn ends, then sends you a prompt to continue.'
-    : 'End your turn now, with one or two lines for the user. The mod puts the /compact line with these instructions in the prompt box, and the user presses Enter. An automatic compaction uses them too.'
+/** The most agents the tool's answer names one by one. */
+export const MAX_NAMED_AGENTS = 10
 
-  return `Stored.${at} ${then}`
+/** True while the agent's loop is still at work, so its report is still to come. */
+export function isUnfinished(status: AgentStatus): boolean {
+  switch (status) {
+    case 'pending':
+    case 'running':
+    case 'waiting':
+      return true
+    case 'idle':
+    case 'completed':
+    case 'failed':
+    case 'killed':
+      return false
+    default:
+      // A status newer than these types. Naming one agent too many costs a
+      // line. Missing one leaves its report unexplained.
+      status satisfies never
+
+      return true
+  }
+}
+
+/**
+ * The agents that still owe the main conversation a report. An agent that
+ * another agent spawned reports to that one.
+ */
+export function unfinishedOf(agents: readonly AgentInfo[]): AgentInfo[] {
+  return agents.filter(agent => agent.parentId === undefined && isUnfinished(agent.status))
+}
+
+/** What the tool's answer says about the unfinished agents; empty for none. */
+export function unfinishedText(unfinished: readonly AgentInfo[]): string {
+  if (unfinished.length === 0) {
+    return ''
+  }
+
+  const named = unfinished
+    .slice(0, MAX_NAMED_AGENTS)
+    .map(agent => `"${agent.description}" (${agent.type}, id ${agent.id})`)
+    .join('; ')
+  const rest = unfinished.length - MAX_NAMED_AGENTS
+  const more = rest > 0 ? `; and ${rest} more` : ''
+
+  return ` Agents that have not finished: ${named}${more}. Each one may report after the compaction, to a conversation that no longer holds its task. If your instructions do not say what each one is doing and what to do with its report, call this tool again with instructions that do.`
+}
+
+/** The tool's answer: the proposal is stored, and what the model does next. */
+export function storedText(
+  gauge: Gauge | null,
+  isUnattended: boolean,
+  unfinished: readonly AgentInfo[],
+): string {
+  const at = gauge === null ? '' : ` The context is at ${where(gauge)}.`
+  const end = unfinished.length === 0 ? 'End your turn now' : 'Then end your turn'
+  const then = isUnattended
+    ? `${end}. The mod compacts the conversation with these instructions when the turn ends, then sends you a prompt to continue.`
+    : `${end}, with one or two lines for the user. The mod puts the /compact line with these instructions in the prompt box, and the user presses Enter. An automatic compaction uses them too.`
+
+  return `Stored.${at}${unfinishedText(unfinished)} ${then}`
 }
 
 /** Why the mod refuses a summary that the engine wants to compute ahead of time. */

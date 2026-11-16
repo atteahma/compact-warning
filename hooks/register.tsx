@@ -39,6 +39,7 @@ import {
   statusText,
   storedText,
   toastText,
+  unfinishedOf,
 } from './logic'
 import type { Config } from './logic'
 
@@ -434,9 +435,14 @@ export const register: Register = (on, options) => {
         isHandedOver: false,
       }))
       await update($, isRowHidden, () => false)
+      // The agents whose reports are still to come: the model is told, so that
+      // its instructions can cover them. A list that fails holds nothing back.
+      const unfinished = await guarded($, 'the agent list', async () =>
+        unfinishedOf(await $.agent.list()),
+      )
       await show($, reading)
 
-      return { result: storedText(reading, config.isUnattended) }
+      return { result: storedText(reading, config.isUnattended, unfinished ?? []) }
     } catch (error) {
       return { deny: `compact-warning could not store the proposal: ${messageOf(error)}` }
     }
