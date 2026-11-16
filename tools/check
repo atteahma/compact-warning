@@ -17,7 +17,7 @@ echo "== Claude Code ${version}"
 
 echo "== validate"
 # The last line is the verdict. The lines about the plugin directory (README,
-# licence, icon) apply only to a public submission.
+# license, icon) apply only to a public submission.
 claude plugin validate . | tail -1
 
 echo "== type check"

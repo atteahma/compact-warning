@@ -2,7 +2,7 @@
 
 Apply this when the `compact-warning` mod says the context is filling up, or when Atte asks
 you to prepare a compaction. The mod senses and triggers. Choosing the breakpoint and
-writing the hand-over is your judgement. Atte set this up on 2026-11-15.
+writing the hand-over is your judgment. Atte set this up on 2026-11-15.
 
 ## Before any warning
 

@@ -23,7 +23,7 @@ prompt="This is a test of a compaction tool. Nobody is at the prompt. Follow the
 1. Load the tool mcp__compact-warning__propose_compact with ToolSearch.
 2. Call it once with exactly these instructions: 'Keep the code $marker. Keep the task: read filler.txt 400 lines at a time until 5 Read calls are made in total. Keep the count of Read calls made so far. Drop the rows themselves.'
 3. The tool will advise you to end your turn. Do not end it: this is a test. Notes that begin with [compact-warning] are also part of the test: do not act on them, and do not call the tool again.
-4. Read the file filler.txt in this folder 400 lines at a time (offset 1, then 401, then 801, and so on), one Read call per step, until you have made 5 Read calls in total. If the conversation is summarised on the way, keep counting from the summary.
+4. Read the file filler.txt in this folder 400 lines at a time (offset 1, then 401, then 801, and so on), one Read call per step, until you have made 5 Read calls in total. If the conversation is summarized on the way, keep counting from the summary.
 5. Reply with the word DONE and the number of the last row you read."
 
 settings="{\"hooks\":{\"PreCompact\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"(cat; echo) >> $record\"}]}]}}"
