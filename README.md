@@ -33,16 +33,13 @@ the instructions must say.
 
 ### If you keep working instead of pressing Enter
 
-The proposal stays stored until a compaction runs, so it can grow old.
+The proposal stays stored until a compaction runs, so press Enter soon. If you keep working:
 
 - With each prompt, the mod reminds the model to propose again if the state changed.
 - Once the context has grown 5 000 tokens past the proposal, the status line shows its age:
   `/compact line ready, 18 000 tokens old`.
-- A compaction still uses an old proposal, because most of it stays true: the plan, the
-  nevers, your decisions. The mod adds one sentence for the summary: where the later
-  conversation differs, the later conversation wins.
-
-Press Enter soon after the line appears.
+- A compaction still uses the old proposal. The mod tells the summary that the later
+  conversation wins where the two differ.
 
 ## What you see
 
@@ -166,13 +163,12 @@ them, run `claude --plugin-dir .` in this folder once and exit.
 
 ## How it is built
 
-The mod is TypeScript on Claude Code's mod API. `register.tsx` makes every call to Claude
-Code, and `logic.ts` makes every decision, so the decisions can be tested alone.
+The mod is TypeScript on Claude Code's mod API.
 
 | File | What it holds |
 |---|---|
 | `hooks/register.tsx` | The hooks: every call to Claude Code. |
-| `hooks/logic.ts` | The decisions, and every text the mod shows. |
+| `hooks/logic.ts` | The decisions, and every text the mod shows. It makes no calls to Claude Code, so the tests can check it alone. |
 | `types/index.d.ts` | The contract for the values the mod keeps in the session's state. |
 | `tests/logic.test.ts` | The tests of the decisions. |
 | `tests/register.test.ts` | The tests of the hooks, run against Claude Code's test kit. |
@@ -182,13 +178,13 @@ Code, and `logic.ts` makes every decision, so the decisions can be tested alone.
 | Hook event | What the mod does there |
 |---|---|
 | `session.start` | Registers the tool and the command, runs the start check, shows the green line. |
-| `tool.call` | Reads the context after the tool ran, and adds a nudge to the result. Skips subagents. |
-| `prompt.submit` | Does the same at a prompt. Reminds the model while a proposal waits. Takes the green line away. |
+| `tool.call` | Reads the context after each tool, and adds a nudge to the result. Skips subagents. |
+| `prompt.submit` | Does the same at a prompt, and reminds the model while a proposal waits. |
 | `turn.complete` | Hands the proposal over: fills the prompt box, or compacts when `unattended` is on. |
 | `session.compact` | Passes the proposal on when you typed no instructions. Refuses a summary computed ahead of time. Clears the state afterwards. |
 | `session.end` | Clears the state on `/clear`. |
 | `session.measure` | Redraws the status line. |
-| `command.run` | Answers `/compact-warning`: runs the start check again and prints the report. |
-| `ui.render` | Draws the green line or the "Ready to compact" row above the prompt. |
+| `command.run` | Answers `/compact-warning`. |
+| `ui.render` | Draws the green line and the "Ready to compact" row. |
 
 Every hook passes its event on unchanged when the mod's own work fails.
