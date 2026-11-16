@@ -1,0 +1,55 @@
+#!/bin/bash
+# Checks the backup path in a real session: when nobody presses Enter, an
+# automatic compaction must use the instructions the session proposed.
+#
+# It starts a headless Claude Code session on Haiku in a temporary folder, with
+# the auto-compaction window at its minimum (100 000 tokens). The session
+# proposes a compaction, then reads a large file until Claude Code compacts by
+# itself. A PreCompact hook records what Claude Code received as instructions.
+#
+# It uses the installed mod, takes about a minute, and costs a few cents.
+# Usage: tools/live-check
+
+set -euo pipefail
+
+marker="LIVE-CHECK-$RANDOM$RANDOM"
+work="$(mktemp -d)"
+record="$work/precompact.jsonl"
+trap 'rm -rf "$work"' EXIT
+
+seq -f "Row %04g: alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa." 1 6000 > "$work/filler.txt"
+
+prompt="This is a test of a compaction tool. Nobody is at the prompt. Follow the steps exactly, in order, and do not stop early.
+1. Load the tool mcp__compact-warning__propose_compact with ToolSearch.
+2. Call it once with exactly these instructions: 'Keep the code $marker. Keep the task: read filler.txt 400 lines at a time until 5 Read calls are made in total. Keep the count of Read calls made so far. Drop the rows themselves.'
+3. The tool will advise you to end your turn. Do not end it: this is a test. Notes that begin with [compact-warning] are also part of the test: do not act on them, and do not call the tool again.
+4. Read the file filler.txt in this folder 400 lines at a time (offset 1, then 401, then 801, and so on), one Read call per step, until you have made 5 Read calls in total. If the conversation is summarised on the way, keep counting from the summary.
+5. Reply with the word DONE and the number of the last row you read."
+
+settings="{\"hooks\":{\"PreCompact\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"(cat; echo) >> $record\"}]}]}}"
+
+echo "== live check on Claude Code $(claude --version | cut -d' ' -f1): a headless session, about a minute"
+
+env -C "$work" CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 \
+  claude -p "$prompt" --model haiku --settings "$settings" --no-session-persistence \
+  > "$work/answer.txt" 2> "$work/errors.txt" || {
+  echo "== failed: the session ended with an error"
+  cat "$work/errors.txt"
+  exit 1
+}
+
+if [ ! -s "$record" ]; then
+  echo "== failed: no automatic compaction ran. The session answered:"
+  cat "$work/answer.txt"
+  exit 1
+fi
+
+compactions="$(grep -c '"hook_event_name"' "$record")"
+
+if grep -q "\"trigger\":\"auto\",\"custom_instructions\":\"[^\"]*$marker" "$record"; then
+  echo "== passed: an automatic compaction used the proposed instructions ($compactions compactions ran)"
+else
+  echo "== failed: $compactions compactions ran, and none got the proposed instructions:"
+  grep -o '"trigger":"[a-z]*","custom_instructions":.\{0,120\}' "$record"
+  exit 1
+fi

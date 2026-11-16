@@ -123,6 +123,17 @@ The type check needs the API types of the installed version in `.claude-plugin/t
 The script says when they are missing or old. To refresh them, run `claude --plugin-dir .`
 in this folder once and exit.
 
+`tools/check` starts no real session. To check the backup in one, run:
+
+```sh
+tools/live-check
+```
+
+It starts a headless session on Haiku with the auto-compaction window at its minimum
+(100 000 tokens). The session proposes a compaction, then reads a large file until Claude
+Code compacts by itself. The check passes when that compaction received the proposed
+instructions. It uses the installed mod, takes about a minute and costs a few cents.
+
 ## How it is built
 
 | File | What it holds |
@@ -133,6 +144,7 @@ in this folder once and exit.
 | `tests/` | `logic.test.ts` checks the decisions; `register.test.ts` runs the hooks against the engine. |
 | `docs/compact-breakpoint.md` | The rule for the model. |
 | `tools/check` | The checks to run after an update. |
+| `tools/live-check` | The check of the backup in a real session. |
 
 | Event | What the mod does there |
 |---|---|
@@ -140,7 +152,7 @@ in this folder once and exit.
 | `tool.call` | Reads the fill after the tool ran, and adds the nudge to the result. Skips subagents. |
 | `prompt.submit` | The same at a prompt. Reminds the model while an offered proposal is unused. Takes the green line away. |
 | `turn.complete` | Offers the proposal: fills the prompt box, or compacts when `unattended` is on. |
-| `session.compact` | Passes the stored instructions on when none were typed. Clears the state afterwards. |
+| `session.compact` | Passes the stored instructions on when none were typed. Refuses a summary computed ahead of time. Clears the state afterwards. |
 | `session.end` | Clears the state on `/clear`. |
 | `session.measure` | Redraws the status line. |
 | `command.run` | Answers `/compact-warning`: runs the checks again and prints the report. |
@@ -153,8 +165,9 @@ Every hook passes its event on unchanged when the mod's own work fails.
 - It cannot pick a breakpoint for a session that never reaches one, for example one command
   that runs for an hour while the context fills from other sources.
 - It does not protect a subagent's own context. Subagents compact by themselves.
-- A summary that Claude Code computed ahead of time may predate the proposal. The mod
-  passes the instructions on at every compaction, but it cannot make the engine recompute.
+- Claude Code can compute a summary ahead of time and reuse it. Such a summary cannot
+  follow instructions that are written later, so the mod refuses it for the main
+  conversation. The price: a compaction writes its summary when it runs, which takes longer.
 - The reading is the input size of the last response, so it lags by one step.
 - The green line and the "Ready to compact" row sit in the band above the prompt. While you
   have collapsed that band (ctrl+x ctrl+a), neither shows.

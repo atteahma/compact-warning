@@ -165,6 +165,10 @@ export function storedText(gauge: Gauge | null, isUnattended: boolean): string {
   return `Stored.${at} ${then}`
 }
 
+/** Why the mod refuses a summary that the engine wants to compute ahead of time. */
+export const PRECOMPUTE_SKIP =
+  'compact-warning: the summary is written when the compaction runs, so that it follows the instructions of that moment.'
+
 export const RESUME_PROMPT =
   'The conversation was compacted with your own instructions. Read the state you wrote down, then continue the work.'
 

@@ -387,6 +387,24 @@ test('a proposal the conversation has moved on from is used with a caveat', asyn
   expect(w.compactions[0]?.instructions).toContain('Keep the plan.\n\n(These instructions were written about 20 000 tokens')
 })
 
+test('no summary is computed ahead of time for the main conversation', async ($, on) => {
+  const w = world(on, { tokens: at(85) })
+  await $.session.start(START)
+  await propose($, 'Keep the plan.')
+
+  const ahead = await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+  expect(ahead.skip).toContain('the summary is written when the compaction runs')
+  expect(w.compactions).toEqual([])
+
+  // A subagent's own transcript is left alone.
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES, agentId: 'a1' })
+  expect(w.compactions).toEqual([{ trigger: 'precompute', instructions: undefined }])
+
+  // The proposal is still there for the compaction that comes.
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  expect(w.compactions[1]).toEqual({ trigger: 'auto', instructions: 'Keep the plan.' })
+})
+
 test('with no proposal a compaction runs unchanged', async ($, on) => {
   const w = world(on, { tokens: at(97) })
   await $.session.start(START)

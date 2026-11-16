@@ -17,6 +17,7 @@ import type { Gauge } from '../types'
 import {
   COMMAND,
   INSTRUCTIONS_DESCRIPTION,
+  PRECOMPUTE_SKIP,
   RESUME_PROMPT,
   STALE_NOTE,
   STALE_TOKENS,
@@ -481,10 +482,18 @@ export const register: Register = (on, options) => {
   })
 
   // Every compaction of the main conversation: when none were typed, pass on
-  // the stored instructions. Never skip one: a full window is worse.
+  // the stored instructions. Never skip a real one: a full window is worse.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) {
       return next(e)
+    }
+
+    // A summary computed ahead of time cannot follow instructions that are
+    // written or changed later, and the engine may reuse it. So none is kept
+    // for the main conversation: each compaction writes its summary when it
+    // runs. This skips no compaction: ahead of time, nothing is installed.
+    if (e.trigger === 'precompute') {
+      return { skip: PRECOMPUTE_SKIP }
     }
 
     // The stored instructions apply when none were typed, and when the typed
@@ -502,7 +511,7 @@ export const register: Register = (on, options) => {
     })
     const outcome = await next(instructions === undefined ? e : { ...e, instructions })
 
-    if (outcome.skip === undefined && e.trigger !== 'precompute') {
+    if (outcome.skip === undefined) {
       await guarded($, 'session.compact', () => reset($))
     }
 
