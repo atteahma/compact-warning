@@ -69,7 +69,9 @@ cp docs/compact-breakpoint.md ~/.claude/rules/
 
 ## Options
 
-Set them in `/config`, or with `--config <key>=<value>` at install.
+Set them with `/plugin configure compact-warning@compact-warning` in a session, or with
+`--config <key>=<value>` at install. Claude Code stores them in `~/.claude/settings.json`,
+under `pluginConfigs["compact-warning@compact-warning"].options`.
 
 | Option | Default | Meaning |
 |---|---|---|
