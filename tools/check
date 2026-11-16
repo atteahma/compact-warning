@@ -16,8 +16,9 @@ version="$(claude --version | awk '{print $1}')"
 echo "== Claude Code ${version}"
 
 echo "== validate"
-claude plugin validate . | grep -E '^(✔|✘)|hooks:|error' || true
-claude plugin validate . >/dev/null
+# The last line is the verdict. The lines about the plugin directory (README,
+# licence, icon) apply only to a public submission.
+claude plugin validate . | tail -1
 
 echo "== type check"
 typecheck=passed

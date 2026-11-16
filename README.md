@@ -25,11 +25,24 @@ mod. It assumes you know what compaction and hooks are.
 
 After a compaction, a `/clear` or a rewind, the mod starts over.
 
+### If you keep working instead of pressing Enter
+
+The proposal stays stored until a compaction runs, so it can grow old:
+
+- With each prompt, the mod reminds the model to propose again if the state changed.
+- Once the context has grown by 5 000 tokens since the proposal, the status line shows
+  its age, for example `/compact line ready, 18 000 tokens old`.
+- A compaction still uses old instructions, because most of them stay true (the plan,
+  the nevers, your decisions). The mod adds one sentence for the summary: where the
+  later conversation differs, the later conversation wins.
+
+Press Enter soon after the line appears.
+
 ## What you see
 
 | Where | What |
 |---|---|
-| Status line under the prompt | `context 42% of auto-compact`, always. It adds `looking for a breakpoint`, `stopping at the next breakpoint` or `/compact line ready`. |
+| Status line under the prompt | `compact-warning: context 42% of auto-compact`, always. It adds `looking for a breakpoint`, `stopping at the next breakpoint` or `/compact line ready`, and the proposal's age once it is old. Before the first reading it says `on`. |
 | Toast | One at each nudge, and one when the `/compact` line is ready. |
 | Row above the prompt | "Ready to compact", with the buttons **Fill prompt** and **Hide**, while a proposal waits. |
 | `/compact-warning` | Prints the reading, the thresholds, the stored proposal and the last error. |

@@ -2,11 +2,13 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   MAX_INSTRUCTIONS,
+  ageOf,
   cleanInstructions,
   compactLine,
   configOf,
   gaugeOf,
   hasShrunk,
+  instructionsFor,
   isStronger,
   levelOf,
   nudgeText,
@@ -71,9 +73,15 @@ test('instructions are trimmed, and refused when empty or too long', () => {
 })
 
 test('the status line says what the mod is doing', () => {
-  const base = { told: 'none', hasProposal: false, versionNote: undefined, lastError: undefined } as const
+  const base = {
+    told: 'none',
+    hasProposal: false,
+    age: 0,
+    versionNote: undefined,
+    lastError: undefined,
+  } as const
 
-  expect(statusText({ ...base, gauge: null })).toBe('compact-warning on')
+  expect(statusText({ ...base, gauge: null })).toBe('on')
   expect(statusText({ ...base, gauge: gaugeOf(420, 1000) })).toBe('context 42% of auto-compact')
   expect(statusText({ ...base, gauge: gaugeOf(820, 1000), told: 'warn' })).toBe(
     'context 82% of auto-compact, looking for a breakpoint',
@@ -83,8 +91,23 @@ test('the status line says what the mod is doing', () => {
   )
   expect(
     statusText({ ...base, gauge: null, versionNote: 'untested on Claude Code 9.9.9' }),
-  ).toBe('compact-warning on · mod untested on Claude Code 9.9.9')
+  ).toBe('on · mod untested on Claude Code 9.9.9')
   expect(statusText({ ...base, gauge: null, lastError: 'tool.call: boom' })).toBe(
-    'compact-warning on · mod error in tool.call: boom',
+    'on · mod error in tool.call: boom',
+  )
+  expect(
+    statusText({ ...base, gauge: gaugeOf(900, 1000), hasProposal: true, age: 18_400 }),
+  ).toBe('context 90% of auto-compact, /compact line ready, 18 000 tokens old')
+})
+
+test('old instructions reach the summary with a caveat', () => {
+  const proposal = { instructions: 'Keep the plan.', tokens: 800_000, isHandedOver: true }
+
+  expect(ageOf(proposal, gaugeOf(804_000, 967_000))).toBe(4000)
+  expect(ageOf({ ...proposal, tokens: null }, gaugeOf(804_000, 967_000))).toBe(0)
+  expect(ageOf(proposal, null)).toBe(0)
+  expect(instructionsFor(proposal, gaugeOf(804_000, 967_000))).toBe('Keep the plan.')
+  expect(instructionsFor(proposal, gaugeOf(820_300, 967_000))).toBe(
+    'Keep the plan.\n\n(These instructions were written about 20 000 tokens of conversation ago. Where the later conversation differs from them, the later conversation wins.)',
   )
 })

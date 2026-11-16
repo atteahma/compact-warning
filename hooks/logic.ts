@@ -11,6 +11,9 @@ export const COMMAND = 'compact-warning'
 /** The longest instructions the tool takes, in characters. */
 export const MAX_INSTRUCTIONS = 4000
 
+/** Growth of the context, in tokens, after which a stored proposal is old. */
+export const STALE_TOKENS = 5000
+
 /** How far under the first threshold the fill must fall to count as shrunk. */
 export const RESET_MARGIN = 5
 
@@ -98,7 +101,7 @@ export function nudgeText(level: 'warn' | 'stop', gauge: Gauge, hasProposal: boo
 }
 
 /** What the model reads with a prompt while an offered proposal is unused. */
-export const STALE_NOTE = `[compact-warning] A compaction proposal from earlier in this session is stored and unused. If this turn changes the state it describes, call ${TOOL} again with new instructions before you end the turn.`
+export const STALE_NOTE = `[compact-warning] A compaction proposal from earlier in this session is stored and unused. A later compaction will use it. If this turn changes the state it describes, call ${TOOL} again with new instructions before you end the turn.`
 
 export function toastText(level: 'warn' | 'stop', gauge: Gauge): string {
   return level === 'warn'
@@ -124,6 +127,31 @@ export function refusalOf(instructions: string): string | undefined {
   return undefined
 }
 
+/** How many tokens the context has grown since the proposal; 0 when unknown. */
+export function ageOf(proposal: Proposal | null, gauge: Gauge | null): number {
+  if (proposal === null || proposal.tokens === null || gauge === null) {
+    return 0
+  }
+
+  return Math.max(0, gauge.tokens - proposal.tokens)
+}
+
+function ageText(age: number): string {
+  return `${count(Math.round(age / 1000) * 1000)} tokens`
+}
+
+/**
+ * The instructions as a compaction gets them. Once the conversation has moved
+ * on since they were written, the summary is told so.
+ */
+export function instructionsFor(proposal: Proposal, gauge: Gauge | null): string {
+  const age = ageOf(proposal, gauge)
+
+  return age < STALE_TOKENS
+    ? proposal.instructions
+    : `${proposal.instructions}\n\n(These instructions were written about ${ageText(age)} of conversation ago. Where the later conversation differs from them, the later conversation wins.)`
+}
+
 export function compactLine(instructions: string): string {
   return `/compact ${instructions}`
 }
@@ -144,16 +172,20 @@ export type Status = {
   gauge: Gauge | null
   told: Told
   hasProposal: boolean
+  /** Tokens the context has grown since the proposal was stored. */
+  age: number
   versionNote: string | undefined
   lastError: string | undefined
 }
 
 /** The line under the prompt: always there while the mod runs. */
 export function statusText(status: Status): string {
-  const { gauge, told, hasProposal, versionNote, lastError } = status
-  const fill = gauge === null ? 'compact-warning on' : `context ${gauge.percent}% of auto-compact`
+  const { gauge, told, hasProposal, age, versionNote, lastError } = status
+  // The engine draws the mod's name in front of this text.
+  const fill = gauge === null ? 'on' : `context ${gauge.percent}% of auto-compact`
+  const old = age < STALE_TOKENS ? '' : `, ${ageText(age)} old`
   const state = hasProposal
-    ? ', /compact line ready'
+    ? `, /compact line ready${old}`
     : told === 'stop'
       ? ', stopping at the next breakpoint'
       : told === 'warn'
@@ -188,13 +220,15 @@ export function reportText(report: Report): string {
   const tested =
     versionNote === undefined ? 'its tests passed on this version' : 'its tests have not passed on this version'
   const context = gauge === null ? 'no reading yet' : `at ${where(gauge)}`
+  const age = ageOf(proposal, gauge)
+  const old = age < STALE_TOKENS ? '' : `, ${ageText(age)} old`
   const stored =
     proposal === null
       ? 'none stored.'
-      : `stored, ${proposal.isHandedOver ? 'offered to you' : 'not offered yet'}:\n${proposal.instructions}`
+      : `stored, ${proposal.isHandedOver ? 'offered to you' : 'not offered yet'}${old}:\n${proposal.instructions}`
 
   return [
-    `compact-warning on Claude Code ${version}: ${tested}.`,
+    `Running on Claude Code ${version}: ${tested}.`,
     `Context: ${context}.`,
     `Nudges: look for a breakpoint at ${config.warnPercent}%, stop at ${config.stopPercent}%. Given so far: ${TOLD_WORDS[told]}.`,
     `Compact without asking: ${config.isUnattended ? 'on' : 'off'}.`,

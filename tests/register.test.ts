@@ -265,6 +265,32 @@ test('instructions the person typed win, and a subagent is left alone', async ($
   ])
 })
 
+test('Enter on the filled line counts as the stored instructions', async ($, on) => {
+  const w = world(on, { tokens: at(85) })
+  await $.session.start(START)
+  await propose($, 'Keep the plan.')
+  await $.turn.complete(TURN_END)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES, instructions: 'Keep the plan.' })
+
+  expect(w.compactions).toEqual([{ trigger: 'manual', instructions: 'Keep the plan.' }])
+})
+
+test('a proposal the conversation has moved on from is used with a caveat', async ($, on) => {
+  const w = world(on, { tokens: at(85) })
+  await $.session.start(START)
+  await propose($, 'Keep the plan.')
+  await $.turn.complete(TURN_END)
+
+  w.tokens = at(85) + 20_000
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(last(w.statuses)).toBe(
+    'context 87% of auto-compact, /compact line ready, 20 000 tokens old',
+  )
+
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  expect(w.compactions[0]?.instructions).toContain('Keep the plan.\n\n(These instructions were written about 20 000 tokens')
+})
+
 test('with no proposal a compaction runs unchanged', async ($, on) => {
   const w = world(on, { tokens: at(97) })
   await $.session.start(START)
@@ -318,7 +344,7 @@ test('a failure inside the mod shows, and the tool call still answers', async ($
 
   expect(ran.deny).toBeUndefined()
   expect(last(w.statuses)).toContain('error in tool.call:')
-  expect(last(w.toasts)).toContain('compact-warning failed in tool.call')
+  expect(last(w.toasts)).toContain('The mod failed in tool.call')
 })
 
 test('a /clear forgets the proposal', async ($, on) => {

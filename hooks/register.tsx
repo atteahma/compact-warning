@@ -15,13 +15,16 @@ import {
   INSTRUCTIONS_DESCRIPTION,
   RESUME_PROMPT,
   STALE_NOTE,
+  STALE_TOKENS,
   TOOL_DESCRIPTION,
   TOOL_NAME,
+  ageOf,
   cleanInstructions,
   compactLine,
   configOf,
   gaugeOf,
   hasShrunk,
+  instructionsFor,
   isStronger,
   levelOf,
   nudgeText,
@@ -89,10 +92,10 @@ async function guarded<T>(
 
     if (line !== lastError) {
       lastError = line
-      $.ui.toast(`compact-warning failed in ${line}`, { timeoutMs: LONG_TOAST_MS })
+      $.ui.toast(`The mod failed in ${line}`, { timeoutMs: LONG_TOAST_MS })
     }
 
-    $.ui.status(`compact-warning: error in ${line}`)
+    $.ui.status(`error in ${line}`)
 
     return undefined
   }
@@ -138,11 +141,14 @@ async function show($: Engine, reading: Gauge | null): Promise<void> {
     await update($, gauge, () => reading)
   }
 
+  const stored = await read($, proposal)
+
   $.ui.status(
     statusText({
       gauge: reading,
       told: await read($, told),
-      hasProposal: (await read($, proposal)) !== null,
+      hasProposal: stored !== null,
+      age: ageOf(stored, reading),
       versionNote,
       lastError,
     }),
@@ -306,7 +312,7 @@ async function checkVersion($: Engine): Promise<void> {
   if ((await $.store.get(WARNED_VERSION_KEY)) !== version) {
     await $.store.set(WARNED_VERSION_KEY, version)
     $.ui.toast(
-      `compact-warning has not passed its tests on Claude Code ${version}. Run tools/check in its folder.`,
+      `The mod has not passed its tests on Claude Code ${version}. Run tools/check in its folder.`,
       { timeoutMs: LONG_TOAST_MS },
     )
   }
@@ -429,13 +435,20 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
-    const stored = await guarded($, 'session.compact', () => read($, proposal))
-    const hasTyped = (e.instructions ?? '').trim() !== ''
-    const outcome = await next(
-      stored === undefined || stored === null || hasTyped
-        ? e
-        : { ...e, instructions: stored.instructions },
-    )
+    // The stored instructions apply when none were typed, and when the typed
+    // ones are the line the mod filled in. Once the conversation has moved on
+    // since they were written, the summary is told so.
+    const instructions = await guarded($, 'session.compact', async () => {
+      const stored = await read($, proposal)
+      const typed = (e.instructions ?? '').trim()
+
+      if (stored === null || (typed !== '' && typed !== stored.instructions)) {
+        return undefined
+      }
+
+      return instructionsFor(stored, await measure($))
+    })
+    const outcome = await next(instructions === undefined ? e : { ...e, instructions })
 
     if (outcome.skip === undefined && e.trigger !== 'precompute') {
       await guarded($, 'session.compact', () => reset($))
@@ -476,7 +489,7 @@ export const register: Register = (on, options) => {
       })
     })
 
-    return { text: text ?? `compact-warning could not read its status: ${lastError ?? 'unknown'}` }
+    return { text: text ?? `The mod could not read its status: ${lastError ?? 'unknown'}` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -490,13 +503,18 @@ export const register: Register = (on, options) => {
 
     const reading = await read($, gauge)
     const at = reading === null ? '' : ` (${reading.percent}% of the auto-compaction point)`
+    const age = ageOf(stored, reading)
+    const old =
+      age < STALE_TOKENS
+        ? ''
+        : ` The saved instructions are ${Math.round(age / 1000)} 000 tokens old.`
     const { Box, Button, Text } = $.ui.resolve(e)
 
     return (
       <Box>
         <Text>
           Ready to compact{at}. Press Enter on the /compact line, or type /compact: the saved
-          instructions apply either way.{' '}
+          instructions apply either way.{old}{' '}
         </Text>
         <Button
           key="fill"
