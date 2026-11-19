@@ -1,11 +1,12 @@
 {
   "name": "compact-warning",
+  "description": "The compact-warning mod for Claude Code.",
   "owner": { "name": "atteahma" },
   "plugins": [
     {
       "name": "compact-warning",
       "source": "./",
-      "description": "Warns a session before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line."
+      "description": "Warns Claude before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line."
     }
   ]
 }

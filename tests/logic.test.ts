@@ -18,60 +18,148 @@ import {
   isUnfinished,
   levelOf,
   nudgeText,
+  readyHint,
+  readyText,
   refusalOf,
+  reportText,
   runningOf,
   runningText,
   statusText,
   stoppedOf,
   storedText,
   taskOf,
+  thresholdsOf,
+  toastText,
+  tokensText,
   unfinishedOf,
 } from '../hooks/logic'
-import type { Task } from '../hooks/logic'
+import type { Report, Task } from '../hooks/logic'
 
-test('the options default to 80 and 88, attended', () => {
-  expect(configOf({})).toEqual({ warnPercent: 80, stopPercent: 88, isUnattended: false })
-})
+/** The auto-compaction point of a 1M window, and of a 200k window. */
+const LARGE = 967_000
+const SMALL = 167_000
 
-test('the second threshold never sits under the first', () => {
-  const config = configOf({ warnPercent: 90, stopPercent: 70, unattended: true })
-
-  expect(config).toEqual({ warnPercent: 90, stopPercent: 90, isUnattended: true })
-})
-
-test('a threshold outside 1 to 99 is pulled back in', () => {
-  expect(configOf({ warnPercent: 0, stopPercent: 250 })).toEqual({
-    warnPercent: 1,
-    stopPercent: 99,
+test('the options default to 80% and 88%, a reserve of 30 000 tokens, attended', () => {
+  expect(configOf({})).toEqual({
+    warnPercent: 80,
+    stopPercent: 88,
+    warnTokens: 0,
+    stopTokens: 0,
+    reserveTokens: 30_000,
     isUnattended: false,
   })
 })
 
-test('the level follows the thresholds', () => {
-  const config = configOf({})
+test('an option outside its range is pulled back in', () => {
+  const config = configOf({
+    warnPercent: 0,
+    stopPercent: 250,
+    warnTokens: -5,
+    stopTokens: 300_000.4,
+    reserveTokens: 'many',
+    unattended: true,
+  })
 
-  expect(levelOf(79, config)).toBe('none')
-  expect(levelOf(80, config)).toBe('warn')
-  expect(levelOf(87, config)).toBe('warn')
-  expect(levelOf(88, config)).toBe('stop')
-  expect(isStronger('stop', 'warn')).toBe(true)
-  expect(isStronger('warn', 'warn')).toBe(false)
-  expect(hasShrunk(74, config)).toBe(true)
-  expect(hasShrunk(75, config)).toBe(false)
+  expect(config).toEqual({
+    warnPercent: 1,
+    stopPercent: 99,
+    warnTokens: 0,
+    stopTokens: 300_000,
+    reserveTokens: 30_000,
+    isUnattended: true,
+  })
 })
 
-test('the gauge is a whole percentage of the auto-compaction point', () => {
-  expect(gaugeOf(773_600, 967_000)).toEqual({ tokens: 773_600, limit: 967_000, percent: 80 })
+test('on a large window the nudges come at their percentages', () => {
+  expect(thresholdsOf(LARGE, configOf({}))).toEqual({ warn: 773_600, stop: 850_960 })
+})
+
+test('on a small window both nudges come earlier, and the reserve remains', () => {
+  // 88% would leave 20 040 tokens. Both nudges move 9 960 tokens earlier.
+  expect(thresholdsOf(SMALL, configOf({}))).toEqual({ warn: 123_640, stop: 137_000 })
+  expect(thresholdsOf(SMALL, configOf({ reserveTokens: 0 }))).toEqual({
+    warn: 133_600,
+    stop: 146_960,
+  })
+  // The reserve takes a quarter of the limit at most.
+  expect(thresholdsOf(60_000, configOf({})).stop).toBe(45_000)
+})
+
+test('a token count gives a nudge when it comes before the percentage', () => {
+  const config = configOf({ warnTokens: 250_000, stopTokens: 300_000 })
+
+  expect(thresholdsOf(LARGE, config)).toEqual({ warn: 250_000, stop: 300_000 })
+  // Past the small window's own nudges, the token counts change nothing.
+  expect(thresholdsOf(SMALL, config)).toEqual({ warn: 123_640, stop: 137_000 })
+})
+
+test('the first nudge never comes after the second', () => {
+  expect(thresholdsOf(LARGE, configOf({ stopTokens: 300_000 }))).toEqual({
+    warn: 300_000,
+    stop: 300_000,
+  })
+  expect(thresholdsOf(LARGE, configOf({ warnPercent: 90, stopPercent: 70 }))).toEqual({
+    warn: 676_900,
+    stop: 676_900,
+  })
+})
+
+test('the level follows the nudges', () => {
+  const thresholds = thresholdsOf(LARGE, configOf({}))
+
+  expect(levelOf(773_599, thresholds)).toBe('none')
+  expect(levelOf(773_600, thresholds)).toBe('warn')
+  expect(levelOf(850_959, thresholds)).toBe('warn')
+  expect(levelOf(850_960, thresholds)).toBe('stop')
+  expect(isStronger('stop', 'warn')).toBe(true)
+  expect(isStronger('warn', 'warn')).toBe(false)
+  // Shrunk: five percent of the limit under the first nudge.
+  expect(hasShrunk(gaugeOf(725_249, LARGE), thresholds)).toBe(true)
+  expect(hasShrunk(gaugeOf(725_250, LARGE), thresholds)).toBe(false)
+})
+
+test('the gauge is a whole percentage of the limit', () => {
+  expect(gaugeOf(773_600, LARGE)).toEqual({
+    tokens: 773_600,
+    limit: LARGE,
+    percent: 80,
+    isAutoCompact: true,
+  })
   expect(gaugeOf(10, 0).percent).toBe(1000)
 })
 
-test('the nudge names the fill and the tool', () => {
-  const text = nudgeText('warn', gaugeOf(773_600, 967_000), false)
+test('a token count is written as Claude Code writes one', () => {
+  expect(tokensText(850)).toBe('850')
+  expect(tokensText(18_400)).toBe('18k')
+  expect(tokensText(773_600)).toBe('774k')
+  expect(tokensText(999_600)).toBe('1M')
+  expect(tokensText(1_250_000)).toBe('1.25M')
+})
 
-  expect(text).toContain('80% of the point where auto-compaction fires')
-  expect(text).toContain('773 600 of 967 000 tokens')
+test('the nudge names the fill and the tool', () => {
+  const text = nudgeText('warn', gaugeOf(773_600, LARGE), false)
+
+  expect(text).toContain(
+    '[compact-warning] The context is at 80% of the point where auto-compaction fires (774k of 967k tokens). Keep working, and look for a good breakpoint.',
+  )
   expect(text).toContain('mcp__compact-warning__propose_compact')
+  expect(text).toContain('If the project has no such place, create none')
   expect(nudgeText('stop', gaugeOf(900, 1000), true)).toContain('already stored')
+})
+
+test('with auto-compaction off, every text measures against the window', () => {
+  const gauge = gaugeOf(164_000, 200_000, false)
+
+  expect(nudgeText('stop', gauge, false)).toContain(
+    'The context window is 82% full (164k of 200k tokens), and auto-compaction is off. Stop at the next breakpoint',
+  )
+  expect(toastText('stop', gauge)).toBe(
+    'Context window 82% full. Claude will stop at the next breakpoint.',
+  )
+  expect(readyText(gauge)).toBe('Ready to compact: the context window is 82% full.')
+  expect(greetingText(200_000, false, { warn: 144_000, stop: 160_000 }).detail).toBe(
+    ' · nudges at 144k and 160k tokens · auto-compact is off',
+  )
 })
 
 test('instructions are trimmed, and refused when empty or too long', () => {
@@ -85,6 +173,15 @@ test('instructions are trimmed, and refused when empty or too long', () => {
   expect(compactLine('keep the plan')).toBe('/compact keep the plan')
 })
 
+test('the toast says what Claude is doing', () => {
+  expect(toastText('warn', gaugeOf(820, 1000))).toBe(
+    'Context at 82% of auto-compact. Claude is looking for a breakpoint.',
+  )
+  expect(toastText('stop', gaugeOf(900, 1000))).toBe(
+    'Context at 90% of auto-compact. Claude will stop at the next breakpoint.',
+  )
+})
+
 test('the status line says what the mod is doing', () => {
   const base = {
     told: 'none',
@@ -94,20 +191,26 @@ test('the status line says what the mod is doing', () => {
     lastError: undefined,
   } as const
 
-  // Under the first threshold, with nothing wrong, there is no line at all.
+  // Before the first nudge, with nothing wrong, there is no line at all.
   expect(statusText({ ...base, gauge: null })).toBeUndefined()
   expect(statusText({ ...base, gauge: gaugeOf(420, 1000) })).toBeUndefined()
   expect(statusText({ ...base, gauge: gaugeOf(820, 1000), told: 'warn' })).toBe(
-    'context 82% of auto-compact, looking for a breakpoint',
+    'context at 82% of auto-compact · looking for a breakpoint',
+  )
+  expect(statusText({ ...base, gauge: gaugeOf(900, 1000), told: 'stop' })).toBe(
+    'context at 90% of auto-compact · stopping at the next breakpoint',
   )
   expect(statusText({ ...base, gauge: gaugeOf(900, 1000), told: 'stop', hasProposal: true })).toBe(
-    'context 90% of auto-compact, /compact line ready',
+    'context at 90% of auto-compact · /compact ready',
   )
   expect(
+    statusText({ ...base, gauge: gaugeOf(900, 1000), hasProposal: true, age: 18_400 }),
+  ).toBe('context at 90% of auto-compact · /compact ready, saved 18k tokens ago')
+  expect(
     statusText({ ...base, gauge: null, versionNote: 'untested on Claude Code 9.9.9' }),
-  ).toBe('mod untested on Claude Code 9.9.9')
+  ).toBe('untested on Claude Code 9.9.9')
   expect(statusText({ ...base, gauge: null, lastError: 'tool.call: boom' })).toBe(
-    'mod error in tool.call: boom',
+    'error in tool.call: boom',
   )
   expect(
     statusText({
@@ -115,52 +218,104 @@ test('the status line says what the mod is doing', () => {
       gauge: gaugeOf(420, 1000),
       versionNote: 'untested on Claude Code 9.9.9',
     }),
-  ).toBe('context 42% of auto-compact · mod untested on Claude Code 9.9.9')
-  expect(
-    statusText({ ...base, gauge: gaugeOf(900, 1000), hasProposal: true, age: 18_400 }),
-  ).toBe('context 90% of auto-compact, /compact line ready, 18 000 tokens old')
+  ).toBe('context at 42% of auto-compact · untested on Claude Code 9.9.9')
 })
 
-test('the green line names the thresholds and the auto-compaction point', () => {
-  expect(greetingText(null, 967_000, configOf({}))).toBe(
-    '✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens).',
+test('the green line names the nudges and the auto-compaction point', () => {
+  expect(greetingText(LARGE, true, thresholdsOf(LARGE, configOf({})))).toEqual({
+    text: '✓ compact-warning is working',
+    detail: ' · nudges at 774k and 851k tokens · auto-compact at 967k',
+  })
+  expect(greetingText(SMALL, true, thresholdsOf(SMALL, configOf({}))).detail).toBe(
+    ' · nudges at 124k and 137k tokens · auto-compact at 167k',
   )
-  expect(
-    greetingText(gaugeOf(116_040, 967_000), 967_000, configOf({ warnPercent: 70, stopPercent: 70 })),
-  ).toBe(
-    '✓ compact-warning is working. It warns at 70% of the auto-compaction point (967 000 tokens). The context is at 12% now.',
+  expect(greetingText(LARGE, true, { warn: 300_000, stop: 300_000 }).detail).toBe(
+    ' · one nudge at 300k tokens · auto-compact at 967k',
   )
 })
+
+test('the row above the prompt says what to run', () => {
+  expect(readyText(null)).toBe('Ready to compact.')
+  expect(readyText(gaugeOf(850, 1000))).toBe('Ready to compact at 85% of auto-compact.')
+  expect(readyHint(0)).toBe(' Run /compact: the saved instructions apply.')
+  expect(readyHint(18_400)).toBe(
+    ' Run /compact: the saved instructions apply. They were saved 18k tokens ago.',
+  )
+})
+
+const REPORT: Report = {
+  gauge: gaugeOf(116_040, LARGE),
+  limit: LARGE,
+  isAutoCompact: true,
+  told: 'none',
+  proposal: null,
+  config: configOf({}),
+  engineVersion: '2.1.325',
+  versionNote: undefined,
+  lastError: undefined,
+}
 
 test('the report opens with the verdict of the checks', () => {
-  expect(healthText('2.1.325', undefined, undefined)).toContain('Health: working.')
-  expect(healthText('9.9.9', 'untested on Claude Code 9.9.9', undefined)).toBe(
-    'Health: needs attention. The mod has not passed its tests on Claude Code 9.9.9. Run tools/check in its folder.',
+  expect(healthText(undefined, undefined)).toBe('Health: working')
+  expect(healthText('untested on Claude Code 9.9.9', undefined)).toBe(
+    "Health: needs attention, untested on Claude Code 9.9.9 (run tools/check in the mod's folder)",
   )
-  expect(healthText('2.1.325', undefined, 'tool.call: boom')).toBe(
-    'Health: needs attention. A hook of the mod failed in tool.call: boom.',
+  expect(healthText(undefined, 'tool.call: boom')).toBe(
+    'Health: needs attention, error in tool.call: boom',
   )
+})
+
+test('the report is one fact to a line', () => {
+  expect(reportText(REPORT)).toBe(
+    [
+      'Health: working',
+      'Context: 116k of 967k tokens, 12% of auto-compact',
+      'Nudges: at 774k and 851k tokens, none sent yet',
+      'Compact without asking: off',
+      'Claude Code: 2.1.325',
+      'Proposal: none',
+    ].join('\n'),
+  )
+
+  const waiting = reportText({
+    ...REPORT,
+    gauge: gaugeOf(880_000, LARGE),
+    told: 'stop',
+    proposal: { instructions: 'Keep the plan.', tokens: 860_000, isHandedOver: true },
+  })
+
+  expect(waiting).toContain('Nudges: at 774k and 851k tokens, second sent')
+  expect(waiting).toContain('Proposal: ready for /compact, saved 20k tokens ago\nKeep the plan.')
+
+  expect(reportText({ ...REPORT, gauge: null })).toContain(
+    'Context: no reading yet, auto-compact at 967k tokens',
+  )
+  expect(
+    reportText({ ...REPORT, gauge: gaugeOf(164_000, 200_000, false), limit: 200_000, isAutoCompact: false }),
+  ).toContain('Context: 164k of 200k tokens, 82% of the window (auto-compact is off)')
 })
 
 test('old instructions reach the summary with a caveat', () => {
   const proposal = { instructions: 'Keep the plan.', tokens: 800_000, isHandedOver: true }
 
-  expect(ageOf(proposal, gaugeOf(804_000, 967_000))).toBe(4000)
-  expect(ageOf({ ...proposal, tokens: null }, gaugeOf(804_000, 967_000))).toBe(0)
+  expect(ageOf(proposal, gaugeOf(804_000, LARGE))).toBe(4000)
+  expect(ageOf({ ...proposal, tokens: null }, gaugeOf(804_000, LARGE))).toBe(0)
   expect(ageOf(proposal, null)).toBe(0)
-  expect(instructionsFor(proposal, gaugeOf(804_000, 967_000))).toBe('Keep the plan.')
-  expect(instructionsFor(proposal, gaugeOf(820_300, 967_000))).toBe(
-    'Keep the plan.\n\n(These instructions were written about 20 000 tokens of conversation ago. Where the later conversation differs from them, the later conversation wins.)',
+  expect(instructionsFor(proposal, gaugeOf(804_000, LARGE))).toBe('Keep the plan.')
+  expect(instructionsFor(proposal, gaugeOf(820_300, LARGE))).toBe(
+    'Keep the plan.\n\n(These instructions were written about 20k tokens of conversation ago. Where the later conversation differs from them, the later conversation wins.)',
   )
 })
 
-const agent = (id: string, status: AgentStatus, parentId?: string): AgentInfo => ({
-  id,
-  description: `Task ${id}`,
-  type: 'Explore',
-  status,
-  ...(parentId === undefined ? {} : { parentId }),
-})
+// Only the fields the mod reads: the engine's own type grows between releases.
+const agent = (id: string, status: AgentStatus, parentId?: string): AgentInfo =>
+  ({
+    id,
+    description: `Task ${id}`,
+    type: 'Explore',
+    status,
+    ...(parentId === undefined ? {} : { parentId }),
+  }) as AgentInfo
 
 test('an agent is unfinished while its loop is at work', () => {
   const statuses: AgentStatus[] = ['pending', 'running', 'waiting', 'idle', 'completed', 'failed', 'killed']
@@ -239,6 +394,9 @@ test('the stored answer names what is still running, and counts what is past ten
   ])
   expect(runningText([])).toBe('')
   expect(storedText(null, false, [])).toContain('Stored. End your turn now, with')
+  expect(storedText(gaugeOf(850, 1000), false, [])).toContain(
+    'Stored. The context is at 85% of the point where auto-compaction fires (850 of 1k tokens). End your turn now',
+  )
   expect(storedText(null, true, ['monitor (id m1)'])).toContain(
     'Stored. Still running, as far as the mod can tell: monitor (id m1). Each one may report',
   )

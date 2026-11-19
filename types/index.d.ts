@@ -11,19 +11,29 @@ export type Proposal = {
   isHandedOver: boolean
 }
 
-/** One reading of the context window against the auto-compaction point. */
+/** One reading of the context against its limit. */
 export type Gauge = {
   /** Input tokens of the last response. */
   tokens: number
-  /** The token count where auto-compaction fires. */
+  /**
+   * The token count the context is measured against: where auto-compaction
+   * fires, or the whole window while auto-compaction is off.
+   */
   limit: number
   /** `tokens` as a whole percentage of `limit`. */
   percent: number
+  /**
+   * False while auto-compaction is off. Absent in a reading that an older
+   * version of the mod stored, which counts as true.
+   */
+  isAutoCompact?: boolean
 }
 
 /** The line that says the start check passed, shown for a few seconds. */
 export type Greeting = {
   text: string
+  /** The rest of the line, drawn dim. Absent in a value of an older version. */
+  detail?: string
   /** When the line leaves, in milliseconds since the epoch. */
   until: number
 }

@@ -16,52 +16,99 @@ export const MAX_INSTRUCTIONS = 4000
 /** Growth of the context, in tokens, after which a stored proposal is old. */
 export const STALE_TOKENS = 5000
 
-/** How far under the first threshold the fill must fall to count as shrunk. */
+/**
+ * How far under the first nudge the fill must fall to count as shrunk, in
+ * percent of the limit.
+ */
 export const RESET_MARGIN = 5
 
 const DEFAULT_WARN = 80
 const DEFAULT_STOP = 88
+const DEFAULT_RESERVE = 30_000
 const MIN_PERCENT = 1
 const MAX_PERCENT = 99
+/** The largest share of the limit that the reserve may take. */
+const MAX_RESERVE_SHARE = 0.25
 
 export type Config = {
   warnPercent: number
   stopPercent: number
+  /** A context size, in tokens, that also gives the first nudge; 0 for none. */
+  warnTokens: number
+  /** The same for the second nudge. */
+  stopTokens: number
+  /** The room, in tokens, kept before the limit for the hand-over; 0 for none. */
+  reserveTokens: number
   isUnattended: boolean
 }
 
 type Options = Readonly<Record<string, unknown>>
 
-function percentOf(value: unknown, fallback: number): number {
-  const n = typeof value === 'number' && Number.isFinite(value) ? value : fallback
-
-  return Math.min(MAX_PERCENT, Math.max(MIN_PERCENT, Math.round(n)))
+function numberOf(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-/** Reads the options, and keeps the second threshold at or above the first. */
-export function configOf(options: Options): Config {
-  const warnPercent = percentOf(options['warnPercent'], DEFAULT_WARN)
-  const stopPercent = percentOf(options['stopPercent'], DEFAULT_STOP)
+function percentOf(value: unknown, fallback: number): number {
+  return Math.min(MAX_PERCENT, Math.max(MIN_PERCENT, Math.round(numberOf(value, fallback))))
+}
 
+function tokensOf(value: unknown, fallback: number): number {
+  return Math.max(0, Math.round(numberOf(value, fallback)))
+}
+
+/** Reads the options, and pulls each one back into its range. */
+export function configOf(options: Options): Config {
   return {
-    warnPercent,
-    stopPercent: Math.max(warnPercent, stopPercent),
+    warnPercent: percentOf(options['warnPercent'], DEFAULT_WARN),
+    stopPercent: percentOf(options['stopPercent'], DEFAULT_STOP),
+    warnTokens: tokensOf(options['warnTokens'], 0),
+    stopTokens: tokensOf(options['stopTokens'], 0),
+    reserveTokens: tokensOf(options['reserveTokens'], DEFAULT_RESERVE),
     isUnattended: options['unattended'] === true,
   }
 }
 
-export function gaugeOf(tokens: number, limit: number): Gauge {
-  const safeLimit = limit > 0 ? limit : 1
+/** Where the two nudges come, in tokens of context. */
+export type Thresholds = { warn: number; stop: number }
 
-  return { tokens, limit: safeLimit, percent: Math.floor((100 * tokens) / safeLimit) }
+/**
+ * Where the nudges come for a limit. Each comes at its percentage of the
+ * limit or at its token count, whichever is first.
+ *
+ * On a small window the percentages leave too little room to hand over in.
+ * Both nudges then come earlier by the same amount, so that the reserve
+ * remains after the second. The first never comes after the second.
+ */
+export function thresholdsOf(limit: number, config: Config): Thresholds {
+  const share = (percent: number): number => Math.ceil((limit * percent) / 100)
+  const first = (atPercent: number, tokens: number): number =>
+    tokens > 0 ? Math.min(atPercent, tokens) : atPercent
+  const stopAsked = first(share(config.stopPercent), config.stopTokens)
+  const warnAsked = first(share(config.warnPercent), config.warnTokens)
+  const reserve = Math.min(config.reserveTokens, Math.floor(limit * MAX_RESERVE_SHARE))
+  const shift = Math.max(0, stopAsked - (limit - reserve))
+  const stop = stopAsked - shift
+
+  return { warn: Math.max(0, Math.min(warnAsked - shift, stop)), stop }
 }
 
-export function levelOf(percent: number, config: Config): Told {
-  if (percent >= config.stopPercent) {
+export function gaugeOf(tokens: number, limit: number, isAutoCompact = true): Gauge {
+  const safeLimit = limit > 0 ? limit : 1
+
+  return {
+    tokens,
+    limit: safeLimit,
+    percent: Math.floor((100 * tokens) / safeLimit),
+    isAutoCompact,
+  }
+}
+
+export function levelOf(tokens: number, thresholds: Thresholds): Told {
+  if (tokens >= thresholds.stop) {
     return 'stop'
   }
 
-  return percent >= config.warnPercent ? 'warn' : 'none'
+  return tokens >= thresholds.warn ? 'warn' : 'none'
 }
 
 const RANK: Readonly<Record<Told, number>> = { none: 0, warn: 1, stop: 2 }
@@ -70,45 +117,84 @@ export function isStronger(level: Told, than: Told): boolean {
   return RANK[level] > RANK[than]
 }
 
-/** True when the context is so far under the first threshold that it shrank. */
-export function hasShrunk(percent: number, config: Config): boolean {
-  return percent < config.warnPercent - RESET_MARGIN
+/** True when the context is so far under the first nudge that it shrank. */
+export function hasShrunk(gauge: Gauge, thresholds: Thresholds): boolean {
+  return gauge.tokens < thresholds.warn - (gauge.limit * RESET_MARGIN) / 100
 }
 
-function count(n: number): string {
-  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+const THOUSAND = 1000
+const MILLION = 1_000_000
+
+/** A token count as Claude Code writes one: 850, 774k, 1.25M. */
+export function tokensText(tokens: number): string {
+  const whole = Math.max(0, Math.round(tokens))
+
+  if (whole < THOUSAND) {
+    return String(whole)
+  }
+
+  const thousands = Math.round(whole / THOUSAND)
+
+  return thousands < THOUSAND ? `${thousands}k` : `${Number((whole / MILLION).toFixed(2))}M`
 }
 
+/**
+ * True unless auto-compaction is off, and the limit is the whole window. A
+ * reading that an older version of the mod stored counts as on.
+ */
+function isAuto(gauge: Gauge): boolean {
+  return gauge.isAutoCompact !== false
+}
+
+function sizes(gauge: Gauge): string {
+  return `${tokensText(gauge.tokens)} of ${tokensText(gauge.limit)} tokens`
+}
+
+/** The fill as a sentence for the model. */
 function where(gauge: Gauge): string {
-  return `${gauge.percent}% of the point where auto-compaction fires (${count(gauge.tokens)} of ${count(gauge.limit)} tokens)`
+  return isAuto(gauge)
+    ? `The context is at ${gauge.percent}% of the point where auto-compaction fires (${sizes(gauge)}).`
+    : `The context window is ${gauge.percent}% full (${sizes(gauge)}), and auto-compaction is off.`
+}
+
+/** The fill in a few words for the person. */
+function fill(gauge: Gauge): string {
+  return isAuto(gauge)
+    ? `context at ${gauge.percent}% of auto-compact`
+    : `context window ${gauge.percent}% full`
+}
+
+function capitalized(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
 const BREAKPOINT =
   'A good breakpoint: verified work is committed, no command is half-run, and no subagent or background task is about to report.'
 
-const HAND_OVER = `At the breakpoint, write the session's state where the project keeps it (its status document, a commit). Then call the tool ${TOOL} with the instructions for the summary, and end your turn. Load the tool with ToolSearch if its schema is not loaded.`
+const HAND_OVER = `At the breakpoint, write the session's state where the project keeps it (a status document, a commit). If the project has no such place, create none: let your instructions say what state the summary must keep. Then call the tool ${TOOL} with the instructions for the summary, and end your turn. Load the tool with ToolSearch if its schema is not loaded.`
 
-/** What the model reads when the fill crosses a threshold. */
+/** What the model reads when the fill reaches a nudge. */
 export function nudgeText(level: 'warn' | 'stop', gauge: Gauge, hasProposal: boolean): string {
-  const head = `[compact-warning] The context is at ${where(gauge)}.`
+  const head = `[compact-warning] ${where(gauge)}`
   const again = hasProposal
     ? ' A proposal is already stored: call the tool again only if the state has changed since.'
     : ''
+  const ask =
+    level === 'warn'
+      ? 'Keep working, and look for a good breakpoint.'
+      : 'Stop at the next breakpoint, and start no new piece of work.'
 
-  if (level === 'warn') {
-    return `${head} Keep working, and look for a good breakpoint. ${BREAKPOINT} ${HAND_OVER} If you have a compaction rule (compact-breakpoint), follow it.${again}`
-  }
-
-  return `${head} Stop at the next breakpoint, and start no new piece of work. ${BREAKPOINT} ${HAND_OVER}${again}`
+  return `${head} ${ask} ${BREAKPOINT} ${HAND_OVER}${again}`
 }
 
 /** What the model reads with a prompt while an offered proposal is unused. */
 export const STALE_NOTE = `[compact-warning] A compaction proposal from earlier in this session is stored and unused. A later compaction will use it. If this turn changes the state it describes, call ${TOOL} again with new instructions before you end the turn.`
 
 export function toastText(level: 'warn' | 'stop', gauge: Gauge): string {
-  return level === 'warn'
-    ? `Context is at ${gauge.percent}% of the auto-compaction point. Claude is looking for a breakpoint.`
-    : `Context is at ${gauge.percent}% of the auto-compaction point. Claude will stop at the next breakpoint.`
+  const doing =
+    level === 'warn' ? 'Claude is looking for a breakpoint.' : 'Claude will stop at the next breakpoint.'
+
+  return `${capitalized(fill(gauge))}. ${doing}`
 }
 
 /** Trims the instructions and closes up runs of blank lines. */
@@ -138,10 +224,6 @@ export function ageOf(proposal: Proposal | null, gauge: Gauge | null): number {
   return Math.max(0, gauge.tokens - proposal.tokens)
 }
 
-function ageText(age: number): string {
-  return `${count(Math.round(age / 1000) * 1000)} tokens`
-}
-
 /**
  * The instructions as a compaction gets them. Once the conversation has moved
  * on since they were written, the summary is told so.
@@ -151,7 +233,7 @@ export function instructionsFor(proposal: Proposal, gauge: Gauge | null): string
 
   return age < STALE_TOKENS
     ? proposal.instructions
-    : `${proposal.instructions}\n\n(These instructions were written about ${ageText(age)} of conversation ago. Where the later conversation differs from them, the later conversation wins.)`
+    : `${proposal.instructions}\n\n(These instructions were written about ${tokensText(age)} tokens of conversation ago. Where the later conversation differs from them, the later conversation wins.)`
 }
 
 export function compactLine(instructions: string): string {
@@ -315,7 +397,7 @@ export function storedText(
   isUnattended: boolean,
   running: readonly string[],
 ): string {
-  const at = gauge === null ? '' : ` The context is at ${where(gauge)}.`
+  const at = gauge === null ? '' : ` ${where(gauge)}`
   const end = running.length === 0 ? 'End your turn now' : 'Then end your turn'
   const then = isUnattended
     ? `${end}. The mod compacts the conversation with these instructions when the turn ends, then sends you a prompt to continue.`
@@ -329,7 +411,7 @@ export const PRECOMPUTE_SKIP =
   'compact-warning: the summary is written when the compaction runs, so that it follows the instructions of that moment.'
 
 export const RESUME_PROMPT =
-  'The conversation was compacted with your own instructions. Read the state you wrote down, then continue the work.'
+  'The conversation was compacted with your own instructions. If you wrote the state down, read it first. Then continue the work.'
 
 export type Status = {
   gauge: Gauge | null
@@ -343,14 +425,15 @@ export type Status = {
 
 /**
  * The line under the prompt, or undefined for none. The engine draws it as a
- * warning, so it is there only when there is something to act on: a threshold
- * was crossed, a /compact line waits, or the mod has a fault.
+ * warning, with the mod's name in front. So it is there only when there is
+ * something to act on: a nudge was given, a /compact line waits, or the mod
+ * has a fault.
  */
 export function statusText(status: Status): string | undefined {
   const { gauge, told, hasProposal, age, versionNote, lastError } = status
-  const old = age < STALE_TOKENS ? '' : `, ${ageText(age)} old`
+  const ready = age < STALE_TOKENS ? '/compact ready' : `/compact ready, saved ${tokensText(age)} tokens ago`
   const state = hasProposal
-    ? `/compact line ready${old}`
+    ? ready
     : told === 'stop'
       ? 'stopping at the next breakpoint'
       : told === 'warn'
@@ -361,47 +444,72 @@ export function statusText(status: Status): string | undefined {
     return undefined
   }
 
-  // The engine draws the mod's name in front of this text.
-  const fill = gauge === null ? undefined : `context ${gauge.percent}% of auto-compact`
-  const head = [fill, state].filter(part => part !== undefined).join(', ')
-  const version = versionNote === undefined ? undefined : `mod ${versionNote}`
-  const error = lastError === undefined ? undefined : `mod error in ${lastError}`
+  const error = lastError === undefined ? undefined : `error in ${lastError}`
 
-  return [head, version, error].filter(part => part !== undefined && part !== '').join(' · ')
+  return [gauge === null ? undefined : fill(gauge), state, versionNote, error]
+    .filter(part => part !== undefined)
+    .join(' · ')
 }
 
-function thresholds(config: Config): string {
-  return config.warnPercent === config.stopPercent
-    ? `${config.warnPercent}%`
-    : `${config.warnPercent}% and ${config.stopPercent}%`
+function nudgesAt(thresholds: Thresholds): string {
+  return thresholds.warn === thresholds.stop
+    ? `at ${tokensText(thresholds.stop)} tokens`
+    : `at ${tokensText(thresholds.warn)} and ${tokensText(thresholds.stop)} tokens`
 }
 
-/** The green line above the prompt once the start check has passed. */
-export function greetingText(gauge: Gauge | null, limit: number, config: Config): string {
-  const now = gauge === null ? '' : ` The context is at ${gauge.percent}% now.`
+/** The green line above the prompt: what it says, and its detail in dim. */
+export type GreetingText = { text: string; detail: string }
 
-  return `✓ compact-warning is working. It warns at ${thresholds(config)} of the auto-compaction point (${count(limit)} tokens).${now}`
+/** The line above the prompt once the start check has passed. */
+export function greetingText(
+  limit: number,
+  isAutoCompact: boolean,
+  thresholds: Thresholds,
+): GreetingText {
+  const nudges = thresholds.warn === thresholds.stop ? 'one nudge' : 'nudges'
+  const limitText = isAutoCompact ? `auto-compact at ${tokensText(limit)}` : 'auto-compact is off'
+
+  return {
+    text: '✓ compact-warning is working',
+    detail: ` · ${nudges} ${nudgesAt(thresholds)} · ${limitText}`,
+  }
+}
+
+/** The row above the prompt while a /compact line waits: its first sentence. */
+export function readyText(gauge: Gauge | null): string {
+  if (gauge === null) {
+    return 'Ready to compact.'
+  }
+
+  return isAuto(gauge)
+    ? `Ready to compact at ${gauge.percent}% of auto-compact.`
+    : `Ready to compact: the context window is ${gauge.percent}% full.`
+}
+
+/** The rest of that row, drawn dim: what to run, and the age of old instructions. */
+export function readyHint(age: number): string {
+  const old = age < STALE_TOKENS ? '' : ` They were saved ${tokensText(age)} tokens ago.`
+
+  return ` Run /compact: the saved instructions apply.${old}`
 }
 
 /** The first line of the report: the verdict of the checks. */
-export function healthText(
-  engineVersion: string | undefined,
-  versionNote: string | undefined,
-  lastError: string | undefined,
-): string {
+export function healthText(versionNote: string | undefined, lastError: string | undefined): string {
   if (lastError !== undefined) {
-    return `Health: needs attention. A hook of the mod failed in ${lastError}.`
+    return `Health: needs attention, error in ${lastError}`
   }
 
   if (versionNote !== undefined) {
-    return `Health: needs attention. The mod has not passed its tests on Claude Code ${engineVersion ?? 'this version'}. Run tools/check in its folder.`
+    return `Health: needs attention, ${versionNote} (run tools/check in the mod's folder)`
   }
 
-  return 'Health: working. The version is tested, the context reading answers, and no hook has failed.'
+  return 'Health: working'
 }
 
 export type Report = {
   gauge: Gauge | null
+  limit: number
+  isAutoCompact: boolean
   told: Told
   proposal: Proposal | null
   config: Config
@@ -411,36 +519,51 @@ export type Report = {
 }
 
 const TOLD_WORDS: Readonly<Record<Told, string>> = {
-  none: 'none',
-  warn: 'look for a breakpoint',
-  stop: 'stop at the next breakpoint',
+  none: 'none sent yet',
+  warn: 'first sent',
+  stop: 'second sent',
+}
+
+function contextLine(report: Report): string {
+  const { gauge, limit, isAutoCompact } = report
+
+  if (gauge === null) {
+    const what = isAutoCompact ? 'auto-compact at' : 'auto-compact is off, window of'
+
+    return `Context: no reading yet, ${what} ${tokensText(limit)} tokens`
+  }
+
+  return isAuto(gauge)
+    ? `Context: ${sizes(gauge)}, ${gauge.percent}% of auto-compact`
+    : `Context: ${sizes(gauge)}, ${gauge.percent}% of the window (auto-compact is off)`
+}
+
+function proposalLine(proposal: Proposal | null, gauge: Gauge | null): string {
+  if (proposal === null) {
+    return 'Proposal: none'
+  }
+
+  const age = ageOf(proposal, gauge)
+  const old = age < STALE_TOKENS ? '' : `, saved ${tokensText(age)} tokens ago`
+  const state = proposal.isHandedOver ? 'ready for /compact' : 'stored, offered when the turn ends'
+
+  return `Proposal: ${state}${old}\n${proposal.instructions}`
 }
 
 /** What /compact-warning prints. */
 export function reportText(report: Report): string {
-  const { gauge, told, proposal, config, engineVersion, versionNote, lastError } = report
-  const version = engineVersion ?? 'an unknown version'
-  const tested =
-    versionNote === undefined ? 'its tests passed on this version' : 'its tests have not passed on this version'
-  const context = gauge === null ? 'no reading yet' : `at ${where(gauge)}`
-  const age = ageOf(proposal, gauge)
-  const old = age < STALE_TOKENS ? '' : `, ${ageText(age)} old`
-  const stored =
-    proposal === null
-      ? 'none stored.'
-      : `stored, ${proposal.isHandedOver ? 'offered to you' : 'not offered yet'}${old}:\n${proposal.instructions}`
+  const { gauge, limit, told, proposal, config, engineVersion, versionNote, lastError } = report
 
   return [
-    healthText(engineVersion, versionNote, lastError),
-    `Running on Claude Code ${version}: ${tested}.`,
-    `Context: ${context}.`,
-    `Nudges: look for a breakpoint at ${config.warnPercent}%, stop at ${config.stopPercent}%. Given so far: ${TOLD_WORDS[told]}.`,
-    `Compact without asking: ${config.isUnattended ? 'on' : 'off'}.`,
-    `Last error: ${lastError ?? 'none'}.`,
-    `Proposal: ${stored}`,
+    healthText(versionNote, lastError),
+    contextLine(report),
+    `Nudges: ${nudgesAt(thresholdsOf(limit, config))}, ${TOLD_WORDS[told]}`,
+    `Compact without asking: ${config.isUnattended ? 'on' : 'off'}`,
+    `Claude Code: ${engineVersion ?? 'unknown version'}`,
+    proposalLine(proposal, gauge),
   ].join('\n')
 }
 
-export const TOOL_DESCRIPTION =`Proposes a compaction of this conversation at a good breakpoint. Call it only in the main conversation, after you have written the session's state where the project keeps it (its status document, a commit). ${BREAKPOINT} After the call, end your turn: the user gets a ready /compact line with your instructions, and an automatic compaction uses them too.`
+export const TOOL_DESCRIPTION = `Proposes a compaction of this conversation at a good breakpoint. Call it only in the main conversation, after you have written the session's state where the project keeps it (a status document, a commit), if it has such a place. ${BREAKPOINT} After the call, end your turn: the user gets a ready /compact line with your instructions, and an automatic compaction uses them too.`
 
-export const INSTRUCTIONS_DESCRIPTION = `What the summary must keep, most important first, then what to drop. A shape that works: (1) your role and the agreed plan, with what not to start; (2) where the truth is: the document and section to read first after the compaction; (3) the live state: what is running, by id, and what to do when each finishes; (4) the exact commands of any repeated step; (5) the nevers; (6) what is still owed; (7) the user's decisions that shape everything; (8) drop: content already written into documents, tool output, back-and-forth. At most ${MAX_INSTRUCTIONS} characters.`
+export const INSTRUCTIONS_DESCRIPTION = `What the summary must keep, most important first, then what to drop. A shape that works: (1) your role and the agreed plan, with what not to start; (2) where the truth is: the document and section to read first after the compaction, or the state itself when no document holds it; (3) the live state: what is running, by id, and what to do when each finishes; (4) the exact commands of any repeated step; (5) the nevers; (6) what is still owed; (7) the user's decisions that shape everything; (8) drop: content already written into documents, tool output, back-and-forth. At most ${MAX_INSTRUCTIONS} characters.`

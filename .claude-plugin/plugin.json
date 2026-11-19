@@ -1,14 +1,17 @@
 {
   "name": "compact-warning",
-  "version": "0.1.0",
-  "description": "Warns a session before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line.",
+  "description": "Warns Claude before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line.",
   "author": { "name": "atteahma" },
+  "homepage": "https://github.com/atteahma/compact-warning",
+  "repository": "https://github.com/atteahma/compact-warning",
+  "keywords": ["compaction", "context", "mod"],
+  "engines": { "claude-code": ">=2.1.325" },
   "types": "./types/index.d.ts",
   "userConfig": {
     "warnPercent": {
       "type": "number",
       "title": "First nudge (%)",
-      "description": "Tell the session to look for a breakpoint at this percentage of the point where auto-compaction fires.",
+      "description": "Claude starts to look for a breakpoint when the context reaches this percentage of the auto-compaction point.",
       "default": 80,
       "min": 1,
       "max": 99
@@ -16,15 +19,36 @@
     "stopPercent": {
       "type": "number",
       "title": "Second nudge (%)",
-      "description": "Tell the session to stop at the next breakpoint at this percentage of the point where auto-compaction fires.",
+      "description": "Claude stops at the next breakpoint when the context reaches this percentage of the auto-compaction point.",
       "default": 88,
       "min": 1,
       "max": 99
     },
+    "warnTokens": {
+      "type": "number",
+      "title": "First nudge (tokens)",
+      "description": "Also give the first nudge when the context reaches this many tokens. 0 turns this off.",
+      "default": 0,
+      "min": 0
+    },
+    "stopTokens": {
+      "type": "number",
+      "title": "Second nudge (tokens)",
+      "description": "Also give the second nudge when the context reaches this many tokens. 0 turns this off.",
+      "default": 0,
+      "min": 0
+    },
+    "reserveTokens": {
+      "type": "number",
+      "title": "Room for the hand-over (tokens)",
+      "description": "On a small context window, both nudges come earlier, so that this many tokens remain before auto-compaction. 0 turns this off.",
+      "default": 30000,
+      "min": 0
+    },
     "unattended": {
       "type": "boolean",
       "title": "Compact without asking",
-      "description": "When the session proposes a compaction, run it at once and tell the session to continue. Off: put the /compact line in the prompt box and wait for Enter.",
+      "description": "Compact as soon as Claude proposes it, then tell Claude to continue. Off: put the /compact line in the prompt box and wait for Enter.",
       "default": false
     }
   }

@@ -9,8 +9,11 @@
 #    the instructions the session proposed.
 #
 # Each check starts a headless Claude Code session on Haiku in a temporary
-# folder. Together they use the installed mod, take about two minutes, and
-# cost a few cents. The first check needs jq.
+# folder. Together they take about two minutes and cost a few cents. The first
+# check needs jq.
+#
+# The sessions use the installed mod. To check another copy, name its folder
+# in CLAUDE_CODE_PLUGIN_DIRS.
 # Usage: tools/live-check
 
 set -euo pipefail

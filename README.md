@@ -1,205 +1,146 @@
 # compact-warning
 
-A Claude Code mod that warns a session before auto-compaction. The session stops at a good
-breakpoint, writes its state down, and hands you a ready `/compact` line. Without the mod,
-auto-compaction can fire at a bad moment, and its summary can lose state.
+A [mod](https://code.claude.com/docs/en/plugins/mods/overview) for Claude Code that warns
+Claude before auto-compaction. Claude stops at a good breakpoint, writes down its state, and
+hands you a ready `/compact` line with instructions for the summary.
 
-This README is for someone who uses Claude Code and wants to install, check or change the
-mod. It assumes you know what compaction and hooks are.
+Without it, auto-compaction fires wherever the session happens to be, and the summary can
+lose what the work needs.
+
+## Install
+
+```sh
+claude plugin install compact-warning --marketplace atteahma/compact-warning
+```
+
+- **It needs** Claude Code 2.1.325 or later.
+- **It works without setup.** The install reports six options as not set. Each has a
+  default, so you can leave them.
+- **New sessions load it.** In a session that is already open, run `/reload-plugins`.
 
 ## How it works
 
 The mod measures the context against the **auto-compaction point**: the token count where
-auto-compaction fires, about 967 000 on a 1M window.
+auto-compaction fires, 967k on a 1M window.
 
 | When | What happens |
 |---|---|
-| After every tool call and prompt of the main conversation | The mod reads how full the context is. |
-| At 80% of the auto-compaction point | The mod nudges the model: look for a good breakpoint. |
-| At 88% | The mod nudges the model: stop at the next breakpoint. |
-| At the breakpoint | The model writes its state where the project keeps it. Then it calls the tool `mcp__compact-warning__propose_compact` with instructions for the summary: what to keep, most important first, and what to drop. The mod stores them as the proposal. |
-| When that turn ends | The mod puts `/compact <instructions>` in the prompt box. You press Enter. |
-| If Claude Code compacts by itself first | The compaction uses the proposal. |
+| The context reaches 80% of that point | The mod tells Claude to look for a good breakpoint. |
+| It reaches 88% | The mod tells Claude to stop at the next breakpoint. |
+| At the breakpoint | Claude writes its state where your project keeps it. Then it proposes a compaction: instructions that say what the summary must keep and what it can drop. |
+| The turn ends | `/compact <instructions>` is in your prompt box. Press Enter. |
+| Claude Code compacts by itself first | That compaction uses the same instructions. |
 
-- **Each nudge is sent once.** It travels with a tool result or a prompt, so it reaches the
-  model in the middle of a long turn.
-- **A draft you are typing stays.** Type `/compact` when you are ready, and the mod adds
-  the proposal.
-- **The mod never blocks a compaction.** After a compaction, a `/clear` or a rewind, it
-  starts over.
-- **What is still running is named.** If a subagent, a background command, a workflow or
-  a monitor is still at work when the model proposes, the tool's answer lists it. The
-  model can then propose again with instructions that say what to do with its report.
+A good breakpoint: verified work is committed, no command is half-run, and no subagent or
+background task is about to report.
 
-The rule `docs/compact-breakpoint.md` tells the model what a good breakpoint is and what
-the instructions must say.
-
-### If you keep working instead of pressing Enter
-
-The proposal stays stored until a compaction runs, so press Enter soon. If you keep working:
-
-- With each prompt, the mod reminds the model to propose again if the state changed.
-- Once the context has grown 5 000 tokens past the proposal, the status line shows its age:
-  `/compact line ready, 18 000 tokens old`.
-- A compaction still uses the old proposal. The mod tells the summary that the later
-  conversation wins where the two differ.
+- **Each nudge is sent once.** It travels with a tool result or a prompt, so it reaches
+  Claude in the middle of a long turn.
+- **A draft you are typing stays.** Run `/compact` when you are ready: the saved
+  instructions apply.
+- **If you keep working, the proposal waits.** Claude renews it when the state changes. A
+  compaction that uses an old proposal tells the summary that the later conversation wins.
+- **Work that is still running is named.** If a subagent or a background task has not
+  finished, Claude is told, so that its instructions can say what to do with the report.
+- **Claude is told to create no new files.** If your project has no place for the state,
+  the instructions carry it.
 
 ## What you see
 
-| Sign | Where | When |
-|---|---|---|
-| Green line | Above the prompt | For 10 seconds after the start check passed. It leaves at your first prompt. |
-| Status line | Under the prompt | From the first nudge or proposal until the compaction, and while the mod has a fault. |
-| Toast | Top right corner | At each nudge, when the `/compact` line is ready, and when the mod finds a fault. |
-| "Ready to compact" row, with the buttons **Fill prompt** and **Hide** | Above the prompt | While a proposal waits. |
-
-The green line:
+When a session starts, above the prompt for 10 seconds:
 
 ```text
-✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens).
+✓ compact-warning is working · nudges at 774k and 851k tokens · auto-compact at 967k
 ```
 
-The status line, in its three stages:
+From the first nudge until the compaction, under the prompt:
 
 ```text
-⚠ compact-warning: context 82% of auto-compact, looking for a breakpoint
-⚠ compact-warning: context 89% of auto-compact, stopping at the next breakpoint
-⚠ compact-warning: context 89% of auto-compact, /compact line ready
+⚠ compact-warning: context at 82% of auto-compact · looking for a breakpoint
+⚠ compact-warning: context at 89% of auto-compact · stopping at the next breakpoint
+⚠ compact-warning: context at 89% of auto-compact · /compact ready
 ```
 
-Claude Code draws the status line as a warning, so the mod shows none under the first
-threshold.
+While a proposal waits, above the prompt. A long `/compact` line in the prompt box leaves
+this row no room, and it then stays away:
 
-At any time, `/compact-warning` prints a report. Its first line is `Health: working`, or
-`Health: needs attention` with the reason. The rest is the context reading, the thresholds,
-the proposal and the last error.
+```text
+Ready to compact at 89% of auto-compact. Run /compact: the saved instructions apply.  [ Fill prompt ] [ Hide ]
+```
 
-## How you know it works
+A toast also marks each nudge and the ready `/compact` line. At any time, `/compact-warning`
+prints a report:
 
-Mods are an early-access part of Claude Code that can change with any update. Claude Code
-skips a mod that fails, and a normal session reports that only in the debug log. So the mod
-runs a start check when a session starts or resumes, and when `/reload-plugins` loads a
-change:
-
-1. It registers its tool and its command.
-2. It compares the running Claude Code version with the one `tools/check` last passed on.
-3. It reads the context's size and the auto-compaction point.
-
-| You see | It means | What to do |
-|---|---|---|
-| The green line | The start check passed. | Nothing. |
-| No green line at the start | The mod is not loaded, or a check failed. | Run `/compact-warning` and read its first line. If Claude Code does not know the command, the mod is not loaded: run `tools/check`, then `/reload-plugins`. |
-| `mod untested on Claude Code <version>` in the status line | Claude Code was updated since `tools/check` last passed. | Run `tools/check`. |
-| `mod error in <hook>: <message>` in the status line | A hook of the mod failed. The session still works, with plain auto-compaction. | Run `tools/check`. |
-
-## Install
-
-Run these commands in this folder.
-
-1. Install the mod at user scope, so that every new session loads it:
-
-   ```sh
-   claude plugin marketplace add "$PWD"
-   claude plugin install compact-warning@compact-warning --scope user
-   ```
-
-2. Copy the rule for the model to your global rules:
-
-   ```sh
-   cp docs/compact-breakpoint.md ~/.claude/rules/
-   ```
-
-3. Run the checks once. Until they pass, the mod reports itself as untested:
-
-   ```sh
-   tools/check
-   ```
-
-4. Run `/reload-plugins` in each session that was already running.
-
-Claude Code reads the mod from this folder, not from a copy. After an edit here,
-`/reload-plugins` loads the change.
+```text
+Health: working
+Context: 116k of 967k tokens, 12% of auto-compact
+Nudges: at 774k and 851k tokens, none sent yet
+Compact without asking: off
+Claude Code: 2.1.328
+Proposal: none
+```
 
 ## Options
 
-Set the options with `/plugin configure compact-warning@compact-warning` in a session, or
-with `--config <key>=<value>` at install. Claude Code stores them in
-`~/.claude/settings.json`, under `pluginConfigs["compact-warning@compact-warning"].options`.
-A running session picks up a change at once.
+Change them with `/plugin configure compact-warning@compact-warning` in a session. A running
+session picks up a change at once.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `warnPercent` | 80 | The first nudge, as a percentage of the auto-compaction point. |
-| `stopPercent` | 88 | The second nudge. Never lower than the first. |
-| `unattended` | off | On: when the turn with the proposal ends, the mod compacts and sends the session a prompt to continue. Off: the mod fills the prompt box and waits for Enter. |
+| `stopPercent` | 88 | The second nudge. |
+| `warnTokens` | off | Also give the first nudge at this context size, in tokens. |
+| `stopTokens` | off | The same for the second nudge. |
+| `reserveTokens` | 30000 | Room for the hand-over. On a small window, both nudges come earlier, so that this many tokens remain before auto-compaction. |
+| `unattended` | off | On: when the turn with the proposal ends, the mod compacts and tells Claude to continue. Off: it fills the prompt box and waits for Enter. |
 
-The nudges come early on purpose. Writing the state down costs tokens, and one large tool
-result can take 1% of a 1M window.
+- **Each nudge comes at its percentage or its token count, whichever is first.** To compact
+  near 300k tokens on a 1M window, set `warnTokens` to 250000 and `stopTokens` to 300000.
+- **The reserve matters on a small window.** Where auto-compaction fires at 167k tokens,
+  88% would leave 20k. The nudges come at 124k and 137k instead.
+- **To move auto-compaction itself,** set Claude Code's own `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
+  The mod follows it.
+- **With auto-compaction off,** the mod measures against the whole context window.
+- **To change what Claude does at a breakpoint,** add a rule of your own. A starting point:
+  copy [`docs/compact-breakpoint.md`](docs/compact-breakpoint.md) to `~/.claude/rules/` and
+  edit it.
 
-## After a Claude Code update
+## If something looks wrong
 
-Run `tools/check`. For proof from a real session, also run `tools/live-check`.
+Mods are an early-access part of Claude Code, and an update of Claude Code can break one.
+A hook that fails is skipped: the session carries on with plain auto-compaction.
 
-| Script | What it does | Cost |
+| You see | It means | What to do |
 |---|---|---|
-| `tools/check` | Runs `claude plugin validate`, the type check and the tests against the installed Claude Code. When they pass, it records the version, and the mod stops reporting itself as untested. | A few seconds, free |
-| `tools/live-check` | Runs two headless Haiku sessions. The first starts a background command and proposes twice: the tool must name the command while it runs, and not after it ended. The second proposes a compaction, then reads a large file until Claude Code compacts by itself: that compaction must receive the proposal. | About two minutes, a few cents |
+| No green line when a session starts | The mod is not loaded, or its start check failed. | Run `/compact-warning`. If Claude Code does not know the command, check `claude plugin list`. |
+| `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod. If the error stays, open an issue with the message. |
 
-The type check needs `npx`, and the API types of the installed version in
-`.claude-plugin/types/`. `tools/check` says when the types are missing or old. To refresh
-them, run `claude --plugin-dir .` in this folder once and exit.
+An organization that manages Claude Code can block mods that its users install.
 
 ## Limits
 
-- **A session that never reaches a breakpoint.** The mod cannot pick one, for example
-  during one command that runs for an hour while the context fills from other sources.
-- **Subagents.** The mod does not protect a subagent's own context. Subagents compact by
+- **A session that never reaches a breakpoint.** The mod cannot pick one. The context then
+  fills, and auto-compaction runs with the last proposal, or with none.
+- **Subagents.** The mod leaves a subagent's own context alone. Subagents compact by
   themselves.
-- **Work that is still running.** The mod never waits for a subagent or a background
-  task: a compaction can run while one is still at work, and its report then arrives in
-  the compacted conversation. The mod names what is still running, and the model's
-  instructions must cover it.
-- **The mod's own list of background tasks.** Claude Code gives a mod a list of the
-  session's agents, but none of its background commands, workflows and monitors. The mod
-  keeps its own list from the tool results that start them and the notifications that end
-  them. Two things follow:
-  - The list starts empty when the mod loads, so it misses a task started before that.
-  - Claude Code does not document the text of a notification. If an update changes it, a
-    finished task stays listed as still running. `tools/check` cannot see that, and
-    `tools/live-check` can.
-- **Slower compaction.** Claude Code can compute a summary ahead of time and reuse it. Such
-  a summary cannot follow instructions written later, so the mod refuses it for the main
-  conversation. A compaction then writes its summary when it runs, which takes longer.
-- **A reading one step behind.** The reading is the input size of the last response.
-- **A collapsed band.** While you have collapsed the band above the prompt (ctrl+x ctrl+a),
-  the green line and the "Ready to compact" row do not show.
-- **A hook that fails later.** The start check proves that the mod loaded and can read the
-  context. A hook that fails afterwards shows as `mod error` in the status line.
+- **Work that is still running.** The mod never waits for a subagent or a background task.
+  Its report can arrive after the compaction, so the instructions must cover it.
+- **Background tasks started before the mod loaded.** The mod keeps its own list of
+  background commands, workflows and monitors, and that list starts empty.
+- **Slower compaction.** Claude Code can compute a summary ahead of time. Such a summary
+  cannot follow later instructions, so the mod refuses it. A compaction then writes its
+  summary when it runs.
+- **A reading one step behind.** The context's size is the input size of the last response.
 
-## How it is built
+## Update or remove
 
-The mod is TypeScript on Claude Code's mod API.
+```sh
+claude plugin update compact-warning@compact-warning
+claude plugin uninstall compact-warning@compact-warning
+```
 
-| File | What it holds |
-|---|---|
-| `hooks/register.tsx` | The hooks: every call to Claude Code. |
-| `hooks/logic.ts` | The decisions, and every text the mod shows. It makes no calls to Claude Code, so the tests can check it alone. |
-| `types/index.d.ts` | The contract for the values the mod keeps in the session's state. |
-| `tests/logic.test.ts` | The tests of the decisions. |
-| `tests/register.test.ts` | The tests of the hooks, run against Claude Code's test kit. |
-| `docs/compact-breakpoint.md` | The rule for the model. |
-| `tools/check`, `tools/live-check` | The checks to run after an update. |
+An update reaches the sessions you start after it.
 
-| Hook event | What the mod does there |
-|---|---|
-| `session.start` | Registers the tool and the command, runs the start check, shows the green line. |
-| `tool.call` | Reads the context after each tool, and adds a nudge to the result. Notes the background tasks that tools start. Skips subagents. |
-| `prompt.submit` | Does the same at a prompt, and reminds the model while a proposal waits. Forgets a background task when its notification says it ended. |
-| `turn.complete` | Hands the proposal over: fills the prompt box, or compacts when `unattended` is on. |
-| `session.compact` | Passes the proposal on when you typed no instructions. Refuses a summary computed ahead of time. Clears the state afterwards. |
-| `session.end` | Clears the state on `/clear`. |
-| `session.measure` | Redraws the status line. |
-| `command.run` | Answers `/compact-warning`. |
-| `ui.render` | Draws the green line and the "Ready to compact" row. |
+## Development
 
-Every hook passes its event on unchanged when the mod's own work fails.
+[`docs/development.md`](docs/development.md) describes the code, the checks and the hooks.

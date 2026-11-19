@@ -15,6 +15,8 @@ type Compaction = { trigger: string; instructions: string | undefined }
 /** The session beneath the mod: what it reads, and a record of what it did. */
 type World = {
   tokens: number | undefined
+  /** The token count where auto-compaction fires; undefined while it is off. */
+  limit: number | undefined
   draft: string
   tested: string | undefined
   isUsageBroken: boolean
@@ -32,6 +34,7 @@ type World = {
 function world(on: On, start: Partial<World> = {}): World {
   const w: World = {
     tokens: undefined,
+    limit: LIMIT,
     draft: '',
     tested: VERSION,
     isUsageBroken: false,
@@ -60,7 +63,14 @@ function world(on: On, start: Partial<World> = {}): World {
       context: {
         window: WINDOW,
         ...(w.tokens === undefined ? {} : { tokens: w.tokens }),
-        ...(e.breakdown === undefined ? {} : { breakdown: { autoCompactThreshold: LIMIT } }),
+        ...(e.breakdown === undefined
+          ? {}
+          : {
+              breakdown:
+                w.limit === undefined
+                  ? { rawMaxTokens: WINDOW, isAutoCompactEnabled: false }
+                  : { autoCompactThreshold: w.limit, isAutoCompactEnabled: true },
+            }),
       },
     }
 
@@ -135,6 +145,10 @@ const STATUS_COMMAND = {
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hello', toolUses: [] }]
 const last = (list: readonly string[]): string => list[list.length - 1] ?? ''
 
+/** An agent as the mod reads one: the engine's own type grows between releases. */
+const agent = (given: Pick<AgentInfo, 'id' | 'description' | 'status'> & { parentId?: string }) =>
+  ({ type: 'Explore', ...given }) as AgentInfo
+
 /** Calls the mod's own tool, which the typed tool names may not list. */
 const propose = ($: Engine, instructions: string) =>
   $.tool.call({ tool: TOOL, instructions } as never)
@@ -159,10 +173,19 @@ const band = ($: Engine, surface: 'terminal' | 'desktop' = 'terminal') =>
 /** The green line of a passed start check, when the row above the prompt has it. */
 async function greenLine($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
   const ui = await band($, surface)
-  const line = await ui.find({ type: 'Text', text: /compact-warning is working/ })
+  const line = await ui.find({ type: 'Text', text: /^✓ compact-warning is working$/ })
   await ui.unmount()
 
   return line
+}
+
+/** The dim detail beside the green line. */
+async function greenDetail($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
+  const ui = await band($, surface)
+  const detail = await ui.find({ type: 'Text', text: /^ · / })
+  await ui.unmount()
+
+  return detail
 }
 
 test('under the first threshold a tool call carries no note, and no status line shows', async ($, on) => {
@@ -182,11 +205,11 @@ test('a passed start check shows a green line for a few seconds', async ($, on) 
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const line = await greenLine($, surface)
+    const detail = await greenDetail($, surface)
 
-    expect(line?.text).toBe(
-      '✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens). The context is at 12% now.',
-    )
     expect(line?.props['color']).toBe('success')
+    expect(detail?.text).toBe(' · nudges at 774k and 851k tokens · auto-compact at 967k')
+    expect(detail?.props['dimColor']).toBe(true)
   }
 
   await clock.advance(9000)
@@ -201,9 +224,7 @@ test('the green line shows before the first response, and leaves at the first pr
   world(on)
   await $.session.start(START)
 
-  expect((await greenLine($))?.text).toBe(
-    '✓ compact-warning is working. It warns at 80% and 88% of the auto-compaction point (967 000 tokens).',
-  )
+  expect(await greenLine($)).toBeDefined()
 
   await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
   expect(await greenLine($)).toBeUndefined()
@@ -215,7 +236,7 @@ test('a start check that fails shows no green line', async ($, on) => {
   await $.session.start(START)
 
   expect(await greenLine($)).toBeUndefined()
-  expect(last(untested.statuses)).toContain('mod untested on Claude Code')
+  expect(last(untested.statuses)).toContain('untested on Claude Code')
 })
 
 test('a broken context reading fails the start check', async ($, on) => {
@@ -241,12 +262,12 @@ test('/compact-warning runs the checks again and prints the verdict', async ($, 
   await $.session.start(START)
 
   const before = await $.command.run(STATUS_COMMAND)
-  expect(before.text).toContain('Health: needs attention. The mod has not passed its tests')
+  expect(before.text).toContain(`Health: needs attention, untested on Claude Code ${VERSION}`)
 
   // tools/check passed in the meantime: the command reads the file again.
   w.tested = VERSION
   const after = await $.command.run(STATUS_COMMAND)
-  expect(after.text).toContain('Health: working.')
+  expect(after.text).toContain('Health: working\n')
   expect(last(w.statuses)).toBe('')
 })
 
@@ -257,7 +278,7 @@ test('each threshold is told once, with the tool result', async ($, on) => {
   const first = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(first.context?.length).toBe(1)
   expect(first.context?.[0]).toContain('look for a good breakpoint')
-  expect(last(w.statuses)).toBe('context 80% of auto-compact, looking for a breakpoint')
+  expect(last(w.statuses)).toBe('context at 80% of auto-compact · looking for a breakpoint')
 
   const second = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(second.context ?? []).toEqual([])
@@ -307,7 +328,7 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
   await $.turn.complete(TURN_END)
   expect(w.fills).toEqual(['/compact Keep the plan.'])
   expect(last(w.toasts)).toContain('Press Enter')
-  expect(last(w.statuses)).toBe('context 85% of auto-compact, /compact line ready')
+  expect(last(w.statuses)).toBe('context at 85% of auto-compact · /compact ready')
 
   // Offered once: a later turn end leaves the prompt box alone.
   await $.turn.complete(TURN_END)
@@ -316,9 +337,11 @@ test('a proposal becomes a /compact line when the turn ends', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await band($, surface)
 
-    expect(await ui.find({ type: 'Text', text: /Ready to compact \(85%/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Ready to compact at 85% of auto-compact\./ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Run \/compact: the saved instructions apply\.$/ })).toBeDefined()
     // The proposal has the row: the green line of the start check gives way.
     expect(await ui.find({ type: 'Text', text: /is working/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', text: 'Hide' })).toBeDefined()
     await ui.press({ key: 'fill' })
     await ui.unmount()
   }
@@ -330,10 +353,10 @@ test('a proposal names the agents that are still running', async ($, on) => {
   const w = world(on, {
     tokens: at(85),
     agents: [
-      { id: 'a1', description: 'Search the logs', type: 'Explore', status: 'running' },
-      { id: 'a2', description: 'Read the docs', type: 'Explore', status: 'completed' },
+      agent({ id: 'a1', description: 'Search the logs', status: 'running' }),
+      agent({ id: 'a2', description: 'Read the docs', status: 'completed' }),
       // Spawned by a1: it reports to a1, not to the main conversation.
-      { id: 'a3', description: 'Count the lines', type: 'Explore', status: 'running', parentId: 'a1' },
+      agent({ id: 'a3', description: 'Count the lines', status: 'running', parentId: 'a1' }),
     ],
   })
   await $.session.start(START)
@@ -393,8 +416,8 @@ test('an agent list that fails holds no proposal back', async ($, on) => {
   const stored = await propose($, 'Keep the plan.')
 
   expect(String(stored.result)).toContain('Stored.')
-  expect(last(w.statuses)).toContain('mod error in the agent list:')
-  expect(w.toasts.join('\n')).toContain('The mod failed in the agent list')
+  expect(last(w.statuses)).toContain('error in the agent list:')
+  expect(w.toasts.join('\n')).toContain('Error in the agent list')
 
   await $.turn.complete(TURN_END)
   expect(w.fills).toEqual(['/compact Keep the plan.'])
@@ -470,11 +493,11 @@ test('a proposal the conversation has moved on from is used with a caveat', asyn
   w.tokens = at(85) + 20_000
   await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(last(w.statuses)).toBe(
-    'context 87% of auto-compact, /compact line ready, 20 000 tokens old',
+    'context at 87% of auto-compact · /compact ready, saved 20k tokens ago',
   )
 
   await $.session.compact({ trigger: 'auto', messages: MESSAGES })
-  expect(w.compactions[0]?.instructions).toContain('Keep the plan.\n\n(These instructions were written about 20 000 tokens')
+  expect(w.compactions[0]?.instructions).toContain('Keep the plan.\n\n(These instructions were written about 20k tokens')
 })
 
 test('no summary is computed ahead of time for the main conversation', async ($, on) => {
@@ -518,11 +541,11 @@ test('unattended, the mod compacts and tells the session to go on', { options: {
   await clock.advance(1000)
   expect(w.compactions).toEqual([{ trigger: 'plugin', instructions: 'Keep the plan.' }])
   expect(w.prompts.map(prompt => prompt.text)).toEqual([
-    'The conversation was compacted with your own instructions. Read the state you wrote down, then continue the work.',
+    'The conversation was compacted with your own instructions. If you wrote the state down, read it first. Then continue the work.',
   ])
 })
 
-test('the thresholds are options', { options: { warnPercent: 10, stopPercent: 20 } }, async ($, on) => {
+test('the percentages are options', { options: { warnPercent: 10, stopPercent: 20 } }, async ($, on) => {
   world(on, { tokens: at(21) })
   await $.session.start(START)
   const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
@@ -530,14 +553,81 @@ test('the thresholds are options', { options: { warnPercent: 10, stopPercent: 20
   expect(ran.context?.[0]).toContain('Stop at the next breakpoint')
 })
 
+test('a token count gives the nudge before the percentage', { options: { warnTokens: 250_000, stopTokens: 300_000 } }, async ($, on) => {
+  const w = world(on, { tokens: 249_000 })
+  await $.session.start(START)
+
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
+
+  w.tokens = 250_000
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'look for a good breakpoint',
+  )
+
+  w.tokens = 300_000
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'Stop at the next breakpoint',
+  )
+})
+
+test('on a small window the nudges come earlier, and the green line says where', async ($, on) => {
+  mock.clock(on)
+  // A 200k window: auto-compaction fires at 167 000 tokens.
+  const w = world(on, { tokens: 113_000, limit: 167_000 })
+  await $.session.start(START)
+
+  expect((await greenDetail($))?.text).toBe(
+    ' · nudges at 124k and 137k tokens · auto-compact at 167k',
+  )
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
+
+  // 82% of the point: 30 000 tokens remain for the hand-over.
+  w.tokens = 137_000
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'Stop at the next breakpoint',
+  )
+})
+
+test('with auto-compaction off the mod measures against the window', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: 100_000, limit: undefined })
+  await $.session.start(START)
+
+  // The window is 1M tokens: the nudges come at 80% and 88% of it.
+  expect((await greenDetail($))?.text).toBe(
+    ' · nudges at 800k and 880k tokens · auto-compact is off',
+  )
+
+  w.tokens = 800_000
+  const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(ran.context?.[0]).toContain('The context window is 80% full (800k of 1M tokens)')
+  expect(last(w.statuses)).toBe('context window 80% full · looking for a breakpoint')
+})
+
+test('an installed copy, with no record of a tested version, skips the version check', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: at(12), tested: undefined })
+  await $.session.start(START)
+
+  expect(await greenLine($)).toBeDefined()
+  expect(w.toasts).toEqual([])
+  expect(w.statuses.every(text => text === '')).toBe(true)
+
+  const report = await $.command.run(STATUS_COMMAND)
+  expect(report.text).toContain('Health: working\n')
+  expect(report.text).toContain(`Claude Code: ${VERSION}`)
+})
+
 test('a Claude Code version the tests have not passed on shows in the status line', async ($, on) => {
   const w = world(on, { tokens: at(10), tested: '2.1.300' })
   await $.session.start(START)
 
   expect(last(w.statuses)).toBe(
-    `context 10% of auto-compact · mod untested on Claude Code ${VERSION}`,
+    `context at 10% of auto-compact · untested on Claude Code ${VERSION}`,
   )
-  expect(w.toasts[0]).toContain('has not passed its tests')
+  expect(w.toasts[0]).toBe(
+    `Untested on Claude Code ${VERSION}. Run tools/check in the mod's folder.`,
+  )
 })
 
 test('a failure inside the mod shows, and the tool call still answers', async ($, on) => {
@@ -548,7 +638,7 @@ test('a failure inside the mod shows, and the tool call still answers', async ($
 
   expect(ran.deny).toBeUndefined()
   expect(last(w.statuses)).toContain('error in tool.call:')
-  expect(last(w.toasts)).toContain('The mod failed in tool.call')
+  expect(last(w.toasts)).toContain('Error in tool.call:')
 })
 
 test('a /clear forgets the proposal', async ($, on) => {

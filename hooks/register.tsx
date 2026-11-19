@@ -7,8 +7,8 @@
 // the status line under the prompt.
 //
 // The engine draws the status line as a warning, so the mod shows one only
-// from the first threshold on, or for a fault. At the start of a session a
-// green line above the prompt says for a few seconds that the checks passed.
+// from the first nudge on, or for a fault. At the start of a session a green
+// line above the prompt says for a few seconds that the checks passed.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -21,7 +21,6 @@ import {
   PRECOMPUTE_SKIP,
   RESUME_PROMPT,
   STALE_NOTE,
-  STALE_TOKENS,
   TOOL_DESCRIPTION,
   TOOL_NAME,
   ageOf,
@@ -36,6 +35,8 @@ import {
   isStronger,
   levelOf,
   nudgeText,
+  readyHint,
+  readyText,
   refusalOf,
   reportText,
   runningOf,
@@ -43,9 +44,10 @@ import {
   stoppedOf,
   storedText,
   taskOf,
+  thresholdsOf,
   toastText,
 } from './logic'
-import type { Config, Task } from './logic'
+import type { Config, GreetingText, Task } from './logic'
 
 type Engine = EngineInterface
 
@@ -59,7 +61,10 @@ const gauge = atom({ plugin: 'compact-warning', key: 'gauge' } as const, null)
 const isRowHidden = atom({ plugin: 'compact-warning', key: 'isRowHidden' } as const, false)
 const greeting = atom({ plugin: 'compact-warning', key: 'greeting' } as const, null)
 
-/** The file tools/check writes: the Claude Code version the tests passed on. */
+/**
+ * The file tools/check writes in a working copy: the Claude Code version the
+ * checks passed on. A copy installed from a repository has none.
+ */
 const TESTED_VERSION_FILE = 'tested-version.txt'
 const WARNED_VERSION_KEY = 'warnedVersion'
 
@@ -74,7 +79,14 @@ const LONG_TOAST_MS = 10 * 1000
 const GREETING_MS = 10 * 1000
 const ERROR_LENGTH = 160
 
-let limitCache: { window: number; limit: number; at: number } | undefined
+/** What the context is measured against. */
+type Limit = {
+  /** Where auto-compaction fires, or the whole window while it is off. */
+  limit: number
+  isAutoCompact: boolean
+}
+
+let limitCache: (Limit & { window: number; at: number }) | undefined
 let senseStartedAt: number | undefined
 let engineVersion: string | undefined
 let versionNote: string | undefined
@@ -138,7 +150,7 @@ async function guarded<T>(
 
     if (line !== lastError) {
       lastError = line
-      $.ui.toast(`The mod failed in ${line}`, { timeoutMs: LONG_TOAST_MS })
+      $.ui.toast(`Error in ${line}`, { timeoutMs: LONG_TOAST_MS })
     }
 
     $.ui.status(`error in ${line}`)
@@ -147,8 +159,8 @@ async function guarded<T>(
   }
 }
 
-/** The token count where auto-compaction fires, read at most every few minutes. */
-async function limitOf($: Engine, window: number): Promise<number> {
+/** What the context is measured against, read at most every few minutes. */
+async function limitOf($: Engine, window: number): Promise<Limit> {
   const now = Date.now()
 
   if (
@@ -156,16 +168,17 @@ async function limitOf($: Engine, window: number): Promise<number> {
     limitCache.window === window &&
     now - limitCache.at < LIMIT_TTL_MS
   ) {
-    return limitCache.limit
+    return limitCache
   }
 
-  const { context } = await $.session.usage({ breakdown: 'summary' })
-  const found =
-    context.breakdown?.autoCompactThreshold ?? context.breakdown?.rawMaxTokens ?? window
-  const limit = found > 0 ? found : window
-  limitCache = { window, limit, at: now }
+  const { breakdown } = (await $.session.usage({ breakdown: 'summary' })).context
+  const point = breakdown?.autoCompactThreshold
+  const found = point ?? breakdown?.rawMaxTokens ?? window
+  // The breakdown leaves the point out while auto-compaction is off.
+  const isAutoCompact = breakdown === undefined || point !== undefined
+  limitCache = { window, limit: found > 0 ? found : window, isAutoCompact, at: now }
 
-  return limit
+  return limitCache
 }
 
 /** Reads the context's fill; null until the live window has had a response. */
@@ -176,14 +189,20 @@ async function measure($: Engine): Promise<Gauge | null> {
     return null
   }
 
-  return gaugeOf(context.tokens, await limitOf($, context.window))
+  const { limit, isAutoCompact } = await limitOf($, context.window)
+
+  return gaugeOf(context.tokens, limit, isAutoCompact)
 }
 
 /** Stores the reading for the row above the prompt and redraws the status line. */
 async function show($: Engine, reading: Gauge | null): Promise<void> {
   const shown = await read($, gauge)
 
-  if (shown?.percent !== reading?.percent || shown?.limit !== reading?.limit) {
+  if (
+    shown?.percent !== reading?.percent ||
+    shown?.limit !== reading?.limit ||
+    shown?.isAutoCompact !== reading?.isAutoCompact
+  ) {
     await update($, gauge, () => reading)
   }
 
@@ -206,17 +225,19 @@ async function refresh($: Engine): Promise<void> {
 }
 
 /**
- * The deep reading for a health check: unlike `measure`, it reads the
- * auto-compaction point afresh, and also before the first response.
+ * The deep reading for a health check: unlike `measure`, it reads the limit
+ * afresh, and also before the first response.
  */
-async function inspect($: Engine): Promise<{ reading: Gauge | null; limit: number }> {
+async function inspect($: Engine): Promise<Limit & { reading: Gauge | null }> {
   limitCache = undefined
   const { context } = await $.session.usage()
-  const limit = await limitOf($, context.window)
+  const { limit, isAutoCompact } = await limitOf($, context.window)
 
   return {
-    reading: context.tokens === undefined ? null : gaugeOf(context.tokens, limit),
+    reading:
+      context.tokens === undefined ? null : gaugeOf(context.tokens, limit, isAutoCompact),
     limit,
+    isAutoCompact,
   }
 }
 
@@ -230,17 +251,17 @@ async function endGreeting($: Engine, until?: number): Promise<void> {
 }
 
 /** Shows the green line that says the start check passed, for a few seconds. */
-async function greet($: Engine, text: string): Promise<void> {
+async function greet($: Engine, line: GreetingText): Promise<void> {
   const until = Date.now() + GREETING_MS
-  await update($, greeting, () => ({ text, until }))
+  await update($, greeting, () => ({ ...line, until }))
   $.clock.after(GREETING_MS, () => {
     void guarded($, 'the start check', () => endGreeting($, until))
   })
 }
 
 /**
- * Reads the fill and answers the note for the model when it has crossed a
- * threshold it was not told about yet. Of several calls at once, one reads.
+ * Reads the fill and answers the note for the model when it has reached a
+ * nudge the model has not had yet. Of several calls at once, one reads.
  */
 async function sense($: Engine, config: Config): Promise<string | undefined> {
   const now = Date.now()
@@ -269,14 +290,15 @@ async function sense($: Engine, config: Config): Promise<string | undefined> {
     }
 
     const before = await read($, told)
-    const level = levelOf(reading.percent, config)
+    const thresholds = thresholdsOf(reading.limit, config)
+    const level = levelOf(reading.tokens, thresholds)
     let note: string | undefined
 
     if (level !== 'none' && isStronger(level, before)) {
       await update($, told, () => level)
       note = nudgeText(level, reading, stored !== null)
       $.ui.toast(toastText(level, reading), { timeoutMs: LONG_TOAST_MS })
-    } else if (before !== 'none' && hasShrunk(reading.percent, config)) {
+    } else if (before !== 'none' && hasShrunk(reading, thresholds)) {
       await update($, told, () => 'none')
     }
 
@@ -370,7 +392,11 @@ async function handOver($: Engine, config: Config, hasAnswered: boolean): Promis
   )
 }
 
-/** Compares the running Claude Code with the version the tests passed on. */
+/**
+ * In a working copy, compares the running Claude Code with the version the
+ * checks passed on. An installed copy has no such record and no checks to
+ * run: there the start check alone says whether the mod works.
+ */
 async function checkVersion($: Engine): Promise<void> {
   const { version } = await $.session.version()
   engineVersion = version
@@ -382,7 +408,7 @@ async function checkVersion($: Engine): Promise<void> {
     tested = undefined
   }
 
-  if (tested === version) {
+  if (tested === undefined || tested === version) {
     versionNote = undefined
 
     return
@@ -393,7 +419,7 @@ async function checkVersion($: Engine): Promise<void> {
   if ((await $.store.get(WARNED_VERSION_KEY)) !== version) {
     await $.store.set(WARNED_VERSION_KEY, version)
     $.ui.toast(
-      `The mod has not passed its tests on Claude Code ${version}. Run tools/check in its folder.`,
+      `Untested on Claude Code ${version}. Run tools/check in the mod's folder.`,
       { timeoutMs: LONG_TOAST_MS },
     )
   }
@@ -424,11 +450,11 @@ export const register: Register = (on, options) => {
         description: 'Show how close this session is to auto-compaction',
       })
       await checkVersion($)
-      const { reading, limit } = await inspect($)
+      const { reading, limit, isAutoCompact } = await inspect($)
       await show($, reading)
 
       if (e.isInteractive && versionNote === undefined && lastError === undefined) {
-        await greet($, greetingText(reading, limit, config))
+        await greet($, greetingText(limit, isAutoCompact, thresholdsOf(limit, config)))
       }
     })
 
@@ -589,11 +615,13 @@ export const register: Register = (on, options) => {
     // The health check on demand: the same readings as at the start.
     const text = await guarded($, 'the status command', async () => {
       await checkVersion($)
-      const { reading } = await inspect($)
+      const { reading, limit, isAutoCompact } = await inspect($)
       await show($, reading)
 
       return reportText({
         gauge: reading,
+        limit,
+        isAutoCompact,
         told: await read($, told),
         proposal: await read($, proposal),
         config,
@@ -603,7 +631,7 @@ export const register: Register = (on, options) => {
       })
     })
 
-    return { text: text ?? `The mod could not read its status: ${lastError ?? 'unknown'}` }
+    return { text: text ?? `Health: needs attention, error in ${lastError ?? 'the status command'}` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -626,39 +654,43 @@ export const register: Register = (on, options) => {
 
       return (
         <Box>
-          <Text color="success">{hello.text}</Text>
+          <Text>
+            <Text color="success">{hello.text}</Text>
+            <Text dimColor>{hello.detail ?? ''}</Text>
+          </Text>
         </Box>
       )
     }
 
     const reading = await read($, gauge)
-    const at = reading === null ? '' : ` (${reading.percent}% of the auto-compaction point)`
-    const age = ageOf(stored, reading)
-    const old =
-      age < STALE_TOKENS
-        ? ''
-        : ` The saved instructions are ${Math.round(age / 1000)} 000 tokens old.`
     const { Box, Button, Text } = $.ui.resolve(e)
 
+    // On a narrow surface the buttons wrap under the text as a group.
     return (
-      <Box>
+      <Box flexWrap="wrap" columnGap="md">
         <Text>
-          Ready to compact{at}. Press Enter on the /compact line, or type /compact: the saved
-          instructions apply either way.{old}{' '}
+          {readyText(reading)}
+          <Text dimColor>{readyHint(ageOf(stored, reading))}</Text>
         </Text>
-        <Button
-          key="fill"
-          label="Fill prompt"
-          onPress={async () => {
-            const held = await read($, proposal)
+        <Box columnGap="sm">
+          <Button
+            key="fill"
+            label="Fill prompt"
+            onPress={async () => {
+              const held = await read($, proposal)
 
-            if (held !== null) {
-              await $.prompt.fill({ text: compactLine(held.instructions) })
-            }
-          }}
-        />
-        <Text> </Text>
-        <Button key="hide" label="Hide" onPress={() => update($, isRowHidden, () => true)} />
+              if (held !== null) {
+                await $.prompt.fill({ text: compactLine(held.instructions) })
+              }
+            }}
+          />
+          <Button
+            key="hide"
+            label="Hide"
+            role="dismiss"
+            onPress={() => update($, isRowHidden, () => true)}
+          />
+        </Box>
       </Box>
     )
   })
