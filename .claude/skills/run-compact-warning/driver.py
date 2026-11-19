@@ -78,6 +78,8 @@ KEYS: Final[dict[str, bytes]] = {
     "tab": b"\t",
     "up": b"\x1b[A",
     "down": b"\x1b[B",
+    "left": b"\x1b[D",
+    "right": b"\x1b[C",
     "ctrl-c": b"\x03",
     "ctrl-l": b"\x0c",
 }

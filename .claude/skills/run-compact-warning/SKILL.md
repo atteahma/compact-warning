@@ -58,7 +58,7 @@ End the session:
 |---|---|
 | `start [-- <claude arguments>]` | Starts the session in the background, in `$D/work`. |
 | `send <text>` | Types text into the prompt box. |
-| `key <name>` | Presses `enter`, `escape`, `tab`, `up`, `down`, `ctrl-c` or `ctrl-l`. |
+| `key <name>` | Presses `enter`, `escape`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c` or `ctrl-l`. |
 | `wait --for <regex> [--timeout 30] [--colors]` | Waits until the screen matches, then prints it. Exit code 1 on a timeout. |
 | `show [--colors]` | Prints the screen. |
 | `stop` | Ends the session. |

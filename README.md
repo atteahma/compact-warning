@@ -13,9 +13,16 @@ lose what the work needs.
 claude plugin install compact-warning --marketplace atteahma/compact-warning
 ```
 
+Then turn on updates, once: in a session, run `/plugin`, go to **Marketplaces**, select
+`compact-warning`, and choose **Turn on auto-update**.
+
+Claude Code ships almost daily, and an update can break a mod. With auto-update on, a fix
+reaches you by itself. Without it, you get a fix only when you run the update command at
+the end of this page.
+
 - **It needs** Claude Code 2.1.325 or later. On an older one the mod turns itself off and
   says so.
-- **It needs no setup,** and the install asks for nothing.
+- **The mod itself needs no setup,** and the install asks for nothing.
 - **New sessions load it.** In a session that is already open, run `/reload-plugins`.
 
 A scheduled check runs the mod's tests against the newest Claude Code. The badge shows its
@@ -122,7 +129,7 @@ A hook that fails is skipped: the session carries on with plain auto-compaction.
 
 | You see | It means | What to do |
 |---|---|---|
-| No green line when a session starts | The mod is not loaded, or its start check failed. | Run `/compact-warning`. If Claude Code does not know the command, check `claude plugin list`. |
+| No green line when a session starts | The mod is not loaded, or its start check failed. An update of Claude Code can cause either. | Update the mod, as shown below, and start a new session. If the line is still missing, run `/compact-warning`. If Claude Code does not know the command, check `claude plugin list`. |
 | `compact-warning is off` when a session starts | Your Claude Code is older than 2.1.325. | Update Claude Code. Its stable channel gets a version later than its latest channel. |
 | `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod, as shown below. If the error stays, open an issue with the message. |
 
@@ -154,8 +161,7 @@ claude plugin uninstall compact-warning@compact-warning
 ```
 
 - **An update reaches the sessions you start after it.**
-- **To get updates by themselves,** open `/plugin`, go to **Marketplaces**, select
-  `compact-warning`, and turn on auto-update.
+- **To get updates by themselves,** turn on auto-update, as the Install section says.
 - **A release can need a newer Claude Code.** An update then keeps the newest release that
   works on yours.
 
