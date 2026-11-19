@@ -13,10 +13,13 @@ lose what the work needs.
 claude plugin install compact-warning --marketplace atteahma/compact-warning
 ```
 
-- **It needs** Claude Code 2.1.325 or later.
-- **It works without setup.** The install reports six options as not set. Each has a
-  default, so you can leave them.
+- **It needs** Claude Code 2.1.325 or later. On an older one the mod turns itself off and
+  says so.
+- **It needs no setup,** and the install asks for nothing.
 - **New sessions load it.** In a session that is already open, run `/reload-plugins`.
+
+The mod is checked every day against the newest Claude Code:
+[![check](https://github.com/atteahma/compact-warning/actions/workflows/check.yml/badge.svg)](https://github.com/atteahma/compact-warning/actions/workflows/check.yml)
 
 ## How it works
 
@@ -75,27 +78,33 @@ prints a report:
 Health: working
 Context: 116k of 967k tokens, 12% of auto-compact
 Nudges: at 774k and 851k tokens, none sent yet
-Compact without asking: off
+Settings: warn 80%, stop 88%, reserve 30k, unattended off
+To change one: /compact-warning stop 300k
 Claude Code: 2.1.328
 Proposal: none
 ```
 
-## Options
+## Settings
 
-Change them with `/plugin configure compact-warning@compact-warning` in a session. A running
-session picks up a change at once.
+Everything works without them. To change one, give `/compact-warning` the setting and its
+value. The change holds at once, for every session on this machine.
 
-| Option | Default | Meaning |
+```text
+/compact-warning stop 300k
+/compact-warning unattended on
+/compact-warning reset
+```
+
+| Setting | Default | Meaning |
 |---|---|---|
-| `warnPercent` | 80 | The first nudge, as a percentage of the auto-compaction point. |
-| `stopPercent` | 88 | The second nudge. |
-| `warnTokens` | off | Also give the first nudge at this context size, in tokens. |
-| `stopTokens` | off | The same for the second nudge. |
-| `reserveTokens` | 30000 | Room for the hand-over. On a small window, both nudges come earlier, so that this many tokens remain before auto-compaction. |
+| `warn` | 80% | The first nudge: a percentage of the auto-compaction point, or a context size such as `250k`. |
+| `stop` | 88% | The second nudge, in the same two forms. |
+| `reserve` | 30k | Room for the hand-over. On a small window, both nudges come earlier, so that this many tokens remain before auto-compaction. `0` turns it off. |
 | `unattended` | off | On: when the turn with the proposal ends, the mod compacts and tells Claude to continue. Off: it fills the prompt box and waits for Enter. |
 
-- **Each nudge comes at its percentage or its token count, whichever is first.** To compact
-  near 300k tokens on a 1M window, set `warnTokens` to 250000 and `stopTokens` to 300000.
+- **To compact near 300k tokens on a 1M window,** set `warn` to `250k` and `stop` to
+  `300k`. A token count never comes later than the default percentage, so a small window
+  stays covered.
 - **The reserve matters on a small window.** Where auto-compaction fires at 167k tokens,
   88% would leave 20k. The nudges come at 124k and 137k instead.
 - **To move auto-compaction itself,** set Claude Code's own `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
@@ -113,7 +122,8 @@ A hook that fails is skipped: the session carries on with plain auto-compaction.
 | You see | It means | What to do |
 |---|---|---|
 | No green line when a session starts | The mod is not loaded, or its start check failed. | Run `/compact-warning`. If Claude Code does not know the command, check `claude plugin list`. |
-| `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod. If the error stays, open an issue with the message. |
+| `compact-warning is off` when a session starts | Your Claude Code is older than 2.1.325. | Update Claude Code. Its stable channel gets a version later than its latest channel. |
+| `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod, as shown below. If the error stays, open an issue with the message. |
 
 An organization that manages Claude Code can block mods that its users install.
 
@@ -131,6 +141,9 @@ An organization that manages Claude Code can block mods that its users install.
   cannot follow later instructions, so the mod refuses it. A compaction then writes its
   summary when it runs.
 - **A reading one step behind.** The context's size is the input size of the last response.
+- **Settings per machine.** They live in the mod's own store, not in `settings.json`. Claude
+  Code drops a store that no session used for its cleanup period, and the settings then
+  return to their defaults.
 
 ## Update or remove
 
@@ -139,7 +152,13 @@ claude plugin update compact-warning@compact-warning
 claude plugin uninstall compact-warning@compact-warning
 ```
 
-An update reaches the sessions you start after it.
+- **An update reaches the sessions you start after it.**
+- **To get updates by themselves,** open `/plugin`, go to **Marketplaces**, select
+  `compact-warning`, and turn on auto-update.
+- **A release can need a newer Claude Code.** An update then keeps the newest release that
+  works on yours.
+
+[`CHANGELOG.md`](CHANGELOG.md) lists the releases.
 
 ## Development
 

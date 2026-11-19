@@ -1,0 +1,44 @@
+# Checks the mod on every push and once a day. The daily run is the one that
+# matters: Claude Code ships almost daily, and a red run on a day without a
+# push means that a new Claude Code broke the mod.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Claude Code ${{ matrix.channel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [latest, stable]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install Claude Code from the ${{ matrix.channel }} channel
+        run: npm install --global "@anthropic-ai/claude-code@${{ matrix.channel }}"
+      - name: Check the mod
+        run: tools/check
+
+  version:
+    name: Version raised
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Compare the version with the commit before
+        run: tools/version-guard "${{ github.event.pull_request.base.sha || github.event.before }}"

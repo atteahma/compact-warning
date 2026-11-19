@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Fails when the mod's code changed since a commit and its version did not.
+# Every commit on main that changes the mod is a release, so it must raise
+# the version: an installed copy moves only when the version changes.
+# Usage: tools/version-guard <commit>
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+readonly MANIFEST=.claude-plugin/plugin.json
+# What an installed copy runs. A change to anything else needs no release.
+readonly CODE=(hooks types "${MANIFEST}")
+
+base="${1:?Usage: tools/version-guard <commit>}"
+
+# A first push has no commit to compare with.
+if [[ "${base}" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+  echo "== passed: there is no earlier commit to compare with"
+  exit 0
+fi
+
+version_in() {
+  sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1
+}
+
+if git diff --quiet "${base}" HEAD -- "${CODE[@]}"; then
+  echo "== passed: the mod's code did not change since ${base:0:7}"
+  exit 0
+fi
+
+before="$(git show "${base}:${MANIFEST}" 2>/dev/null | version_in || true)"
+now="$(version_in < "${MANIFEST}")"
+
+if [[ -z "${now}" ]]; then
+  echo "== failed: ${MANIFEST} has no version"
+  exit 1
+fi
+
+if [[ "${before}" == "${now}" ]]; then
+  echo "== failed: the mod's code changed since ${base:0:7}, and the version is still ${now}"
+  echo "   Raise \"version\" in ${MANIFEST}, and add the release to CHANGELOG.md."
+  git diff --stat "${base}" HEAD -- "${CODE[@]}" | tail -5
+  exit 1
+fi
+
+echo "== passed: the version went from ${before:-none} to ${now}"

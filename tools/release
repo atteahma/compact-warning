@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Releases the version that .claude-plugin/plugin.json names. It runs the
+# checks, then tags the commit as Claude Code expects a release to be tagged:
+# compact-warning--v<version>. With that tag, a Claude Code that is too old for
+# a later release still gets this one.
+#
+# The version and its CHANGELOG.md entry belong to the commit that changes the
+# mod. This script changes no file.
+# Usage: tools/release [--push] [--skip-live]
+#   --push       also send main and the tag to origin
+#   --skip-live  skip tools/live-check, which costs a few cents
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+readonly MANIFEST=.claude-plugin/plugin.json
+readonly CHANGELOG=CHANGELOG.md
+
+push=no
+live=yes
+
+for argument in "$@"; do
+  case "${argument}" in
+    --push) push=yes ;;
+    --skip-live) live=no ;;
+    *)
+      echo "Usage: tools/release [--push] [--skip-live]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+fail() {
+  echo "== failed: $1" >&2
+  exit 1
+}
+
+name="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' "${MANIFEST}" | head -1)"
+version="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "${MANIFEST}" | head -1)"
+tag="${name}--v${version}"
+
+[[ -n "${version}" ]] || fail "${MANIFEST} has no version"
+[[ "$(git branch --show-current)" == "main" ]] || fail "a release is made from main"
+[[ -z "$(git status --porcelain)" ]] || fail "the working tree has changes"
+grep -q "^## ${version}\$" "${CHANGELOG}" || fail "${CHANGELOG} has no entry '## ${version}'"
+
+if git rev-parse -q --verify "refs/tags/${tag}" > /dev/null; then
+  fail "the tag ${tag} exists already: raise the version for a new release"
+fi
+
+echo "== release ${version} of ${name}"
+tools/check
+
+if [[ "${live}" == yes ]]; then
+  tools/live-check
+else
+  echo "== skipped the live check"
+fi
+
+claude plugin tag . | tail -1
+
+if [[ "${push}" == yes ]]; then
+  git push origin main
+  git push origin "refs/tags/${tag}"
+  echo "== released ${version}: main and ${tag} are on origin"
+else
+  echo "== tagged ${tag}. To publish it:"
+  echo "   git push origin main && git push origin refs/tags/${tag}"
+fi

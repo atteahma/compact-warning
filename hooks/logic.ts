@@ -29,63 +29,218 @@ const MIN_PERCENT = 1
 const MAX_PERCENT = 99
 /** The largest share of the limit that the reserve may take. */
 const MAX_RESERVE_SHARE = 0.25
+/**
+ * The oldest Claude Code the mod runs on. The manifest's `engines` states the
+ * same floor, but a Claude Code older than 2.1.323 does not read it.
+ */
+export const MIN_VERSION = '2.1.325'
 
-export type Config = {
-  warnPercent: number
-  stopPercent: number
-  /** A context size, in tokens, that also gives the first nudge; 0 for none. */
-  warnTokens: number
-  /** The same for the second nudge. */
-  stopTokens: number
+const VERSION_PARTS = /^(\d+)\.(\d+)\.(\d+)/
+
+/** True when `version` is older than `floor`; false when either is unreadable. */
+export function isOlder(version: string, floor: string): boolean {
+  const ours = VERSION_PARTS.exec(version)?.slice(1).map(Number)
+  const theirs = VERSION_PARTS.exec(floor)?.slice(1).map(Number)
+
+  if (ours === undefined || theirs === undefined) {
+    return false
+  }
+
+  const at = ours.findIndex((part, index) => part !== theirs[index])
+
+  return at !== -1 && (ours[at] ?? 0) < (theirs[at] ?? 0)
+}
+
+/** Why the mod is off on a Claude Code older than its floor. */
+export function floorText(version: string): string {
+  return `needs Claude Code ${MIN_VERSION} or later, this is ${version}`
+}
+
+/** Where a nudge comes: at a percentage of the limit, or at a context size. */
+export type Mark = { unit: 'percent' | 'tokens'; value: number }
+
+export type Settings = {
+  warn: Mark
+  stop: Mark
   /** The room, in tokens, kept before the limit for the hand-over; 0 for none. */
   reserveTokens: number
   isUnattended: boolean
 }
 
-type Options = Readonly<Record<string, unknown>>
-
-function numberOf(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+export const DEFAULT_SETTINGS: Settings = {
+  warn: { unit: 'percent', value: DEFAULT_WARN },
+  stop: { unit: 'percent', value: DEFAULT_STOP },
+  reserveTokens: DEFAULT_RESERVE,
+  isUnattended: false,
 }
 
-function percentOf(value: unknown, fallback: number): number {
-  return Math.min(MAX_PERCENT, Math.max(MIN_PERCENT, Math.round(numberOf(value, fallback))))
+/** The store's key for the settings. */
+export const SETTINGS_KEY = 'settings'
+
+/**
+ * What the store holds: only what the person changed, so that a setting they
+ * never touched follows the default of a later version.
+ */
+export type StoredSettings = Partial<Settings>
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
 }
 
-function tokensOf(value: unknown, fallback: number): number {
-  return Math.max(0, Math.round(numberOf(value, fallback)))
-}
+function markOf(value: unknown): Mark | undefined {
+  const unit = field(value, 'unit')
+  const size = field(value, 'value')
 
-/** Reads the options, and pulls each one back into its range. */
-export function configOf(options: Options): Config {
-  return {
-    warnPercent: percentOf(options['warnPercent'], DEFAULT_WARN),
-    stopPercent: percentOf(options['stopPercent'], DEFAULT_STOP),
-    warnTokens: tokensOf(options['warnTokens'], 0),
-    stopTokens: tokensOf(options['stopTokens'], 0),
-    reserveTokens: tokensOf(options['reserveTokens'], DEFAULT_RESERVE),
-    isUnattended: options['unattended'] === true,
+  if (!isCount(size)) {
+    return undefined
   }
+
+  if (unit === 'percent') {
+    return size >= MIN_PERCENT && size <= MAX_PERCENT ? { unit, value: size } : undefined
+  }
+
+  return unit === 'tokens' && size > 0 ? { unit, value: size } : undefined
+}
+
+/** The stored settings that are well formed: the store outlives a version. */
+export function storedOf(value: unknown): StoredSettings {
+  const warn = markOf(field(value, 'warn'))
+  const stop = markOf(field(value, 'stop'))
+  const reserveTokens = field(value, 'reserveTokens')
+  const isUnattended = field(value, 'isUnattended')
+
+  return {
+    ...(warn === undefined ? {} : { warn }),
+    ...(stop === undefined ? {} : { stop }),
+    ...(isCount(reserveTokens) ? { reserveTokens } : {}),
+    ...(typeof isUnattended === 'boolean' ? { isUnattended } : {}),
+  }
+}
+
+/** The settings in force: the defaults, with what the person changed. */
+export function settingsOf(value: unknown): Settings {
+  return { ...DEFAULT_SETTINGS, ...storedOf(value) }
+}
+
+const PERCENT = /^(\d{1,2})%$/
+const TOKENS = /^(\d+(?:\.\d+)?)([km])?$/i
+
+function countIn(text: string): number | undefined {
+  const found = TOKENS.exec(text)
+
+  if (found === null) {
+    return undefined
+  }
+
+  const unit = found[2]?.toLowerCase()
+  const scale = unit === 'k' ? THOUSAND : unit === 'm' ? MILLION : 1
+
+  return Math.round(Number(found[1]) * scale)
+}
+
+function markIn(text: string): Mark | undefined {
+  const percent = PERCENT.exec(text)?.[1]
+
+  if (percent !== undefined) {
+    return markOf({ unit: 'percent', value: Number(percent) })
+  }
+
+  const tokens = countIn(text)
+
+  // A bare small number could be a percentage or a token count: neither is taken.
+  return tokens === undefined || tokens < THOUSAND ? undefined : { unit: 'tokens', value: tokens }
+}
+
+function markText(mark: Mark): string {
+  return mark.unit === 'percent' ? `${mark.value}%` : tokensText(mark.value)
+}
+
+/** What `/compact-warning <args>` asks for. */
+export type Request =
+  | { kind: 'report' }
+  | { kind: 'reset' }
+  | { kind: 'set'; change: StoredSettings; said: string }
+  | { kind: 'refuse'; why: string }
+
+export const USAGE = [
+  'Settings:',
+  `/${COMMAND} warn 80%: the first nudge, as a percentage of the limit or a token count (250k)`,
+  `/${COMMAND} stop 88%: the second nudge`,
+  `/${COMMAND} reserve 30k: room kept for the hand-over on a small window`,
+  `/${COMMAND} unattended on: compact without asking`,
+  `/${COMMAND} reset: back to the defaults`,
+].join('\n')
+
+/** Reads what the person typed after the command's name. */
+export function requestOf(args: string): Request {
+  const [name = '', value = '', ...rest] = args.trim().toLowerCase().split(/\s+/)
+
+  if (name === '') {
+    return { kind: 'report' }
+  }
+
+  if (name === 'reset' && value === '') {
+    return { kind: 'reset' }
+  }
+
+  if (rest.length > 0) {
+    return { kind: 'refuse', why: 'Give one setting and one value.' }
+  }
+
+  if (name === 'warn' || name === 'stop') {
+    const mark = markIn(value)
+
+    return mark === undefined
+      ? { kind: 'refuse', why: `Give ${name} a percentage such as 80%, or a token count such as 250k.` }
+      : { kind: 'set', change: { [name]: mark }, said: `Set ${name} to ${markText(mark)}.` }
+  }
+
+  if (name === 'reserve') {
+    const tokens = countIn(value)
+
+    return tokens === undefined
+      ? { kind: 'refuse', why: 'Give reserve a token count such as 30k, or 0 for none.' }
+      : { kind: 'set', change: { reserveTokens: tokens }, said: `Set reserve to ${tokensText(tokens)}.` }
+  }
+
+  if (name === 'unattended') {
+    return value === 'on' || value === 'off'
+      ? { kind: 'set', change: { isUnattended: value === 'on' }, said: `Set unattended to ${value}.` }
+      : { kind: 'refuse', why: 'Give unattended the value on or off.' }
+  }
+
+  return { kind: 'refuse', why: `There is no setting "${name}".` }
+}
+
+/** The settings in one line, as the report and the README write them. */
+export function settingsText(settings: Settings): string {
+  return [
+    `warn ${markText(settings.warn)}`,
+    `stop ${markText(settings.stop)}`,
+    `reserve ${tokensText(settings.reserveTokens)}`,
+    `unattended ${settings.isUnattended ? 'on' : 'off'}`,
+  ].join(', ')
 }
 
 /** Where the two nudges come, in tokens of context. */
 export type Thresholds = { warn: number; stop: number }
 
 /**
- * Where the nudges come for a limit. Each comes at its percentage of the
- * limit or at its token count, whichever is first.
+ * Where the nudges come for a limit. A nudge set as a percentage comes at
+ * that share of the limit. One set as a token count comes at that size, and
+ * never later than its default percentage, so a small window is still covered.
  *
  * On a small window the percentages leave too little room to hand over in.
  * Both nudges then come earlier by the same amount, so that the reserve
  * remains after the second. The first never comes after the second.
  */
-export function thresholdsOf(limit: number, config: Config): Thresholds {
+export function thresholdsOf(limit: number, settings: Settings): Thresholds {
   const share = (percent: number): number => Math.ceil((limit * percent) / 100)
-  const first = (atPercent: number, tokens: number): number =>
-    tokens > 0 ? Math.min(atPercent, tokens) : atPercent
-  const stopAsked = first(share(config.stopPercent), config.stopTokens)
-  const warnAsked = first(share(config.warnPercent), config.warnTokens)
-  const reserve = Math.min(config.reserveTokens, Math.floor(limit * MAX_RESERVE_SHARE))
+  const asked = (mark: Mark, fallback: number): number =>
+    mark.unit === 'percent' ? share(mark.value) : Math.min(mark.value, share(fallback))
+  const stopAsked = asked(settings.stop, DEFAULT_STOP)
+  const warnAsked = asked(settings.warn, DEFAULT_WARN)
+  const reserve = Math.min(settings.reserveTokens, Math.floor(limit * MAX_RESERVE_SHARE))
   const shift = Math.max(0, stopAsked - (limit - reserve))
   const stop = stopAsked - shift
 
@@ -419,18 +574,17 @@ export type Status = {
   hasProposal: boolean
   /** Tokens the context has grown since the proposal was stored. */
   age: number
-  versionNote: string | undefined
   lastError: string | undefined
 }
 
 /**
  * The line under the prompt, or undefined for none. The engine draws it as a
  * warning, with the mod's name in front. So it is there only when there is
- * something to act on: a nudge was given, a /compact line waits, or the mod
- * has a fault.
+ * something to act on: a nudge was given, a /compact line waits, or a hook of
+ * the mod failed.
  */
 export function statusText(status: Status): string | undefined {
-  const { gauge, told, hasProposal, age, versionNote, lastError } = status
+  const { gauge, told, hasProposal, age, lastError } = status
   const ready = age < STALE_TOKENS ? '/compact ready' : `/compact ready, saved ${tokensText(age)} tokens ago`
   const state = hasProposal
     ? ready
@@ -440,13 +594,13 @@ export function statusText(status: Status): string | undefined {
         ? 'looking for a breakpoint'
         : undefined
 
-  if (state === undefined && versionNote === undefined && lastError === undefined) {
+  if (state === undefined && lastError === undefined) {
     return undefined
   }
 
   const error = lastError === undefined ? undefined : `error in ${lastError}`
 
-  return [gauge === null ? undefined : fill(gauge), state, versionNote, error]
+  return [gauge === null ? undefined : fill(gauge), state, error]
     .filter(part => part !== undefined)
     .join(' · ')
 }
@@ -457,8 +611,11 @@ function nudgesAt(thresholds: Thresholds): string {
     : `at ${tokensText(thresholds.warn)} and ${tokensText(thresholds.stop)} tokens`
 }
 
-/** The green line above the prompt: what it says, and its detail in dim. */
-export type GreetingText = { text: string; detail: string }
+/**
+ * The line above the prompt when a session starts: what it says, its detail
+ * in dim, and whether the mod is on.
+ */
+export type GreetingText = { text: string; detail: string; isOff: boolean }
 
 /** The line above the prompt once the start check has passed. */
 export function greetingText(
@@ -472,7 +629,13 @@ export function greetingText(
   return {
     text: '✓ compact-warning is working',
     detail: ` · ${nudges} ${nudgesAt(thresholds)} · ${limitText}`,
+    isOff: false,
   }
+}
+
+/** The line above the prompt on a Claude Code older than the mod's floor. */
+export function offGreeting(version: string): GreetingText {
+  return { text: 'compact-warning is off', detail: ` · ${floorText(version)}`, isOff: true }
 }
 
 /** The row above the prompt while a /compact line waits: its first sentence. */
@@ -493,17 +656,24 @@ export function readyHint(age: number): string {
   return ` Run /compact: the saved instructions apply.${old}`
 }
 
-/** The first line of the report: the verdict of the checks. */
-export function healthText(versionNote: string | undefined, lastError: string | undefined): string {
-  if (lastError !== undefined) {
-    return `Health: needs attention, error in ${lastError}`
-  }
+/** How a person gets a newer version of the mod. */
+export const UPDATE_COMMAND = `claude plugin update ${COMMAND}@${COMMAND}`
 
-  if (versionNote !== undefined) {
-    return `Health: needs attention, ${versionNote} (run tools/check in the mod's folder)`
-  }
+/** What the toast says when a hook of the mod has failed. */
+export function errorToast(lastError: string): string {
+  return `Error in ${lastError}. Run /${COMMAND} for what to do.`
+}
 
-  return 'Health: working'
+/** The start of the report: the verdict of the checks, and what to do. */
+export function healthText(lastError: string | undefined): string {
+  return lastError === undefined
+    ? 'Health: working'
+    : `Health: needs attention, error in ${lastError}\nFor a fix, run: ${UPDATE_COMMAND}`
+}
+
+/** What /compact-warning prints on a Claude Code older than the mod's floor. */
+export function offReport(version: string): string {
+  return `Health: off, ${floorText(version)}\nUpdate Claude Code to turn the mod on. Its stable channel gets a version later than its latest channel.`
 }
 
 export type Report = {
@@ -512,9 +682,8 @@ export type Report = {
   isAutoCompact: boolean
   told: Told
   proposal: Proposal | null
-  config: Config
+  settings: Settings
   engineVersion: string | undefined
-  versionNote: string | undefined
   lastError: string | undefined
 }
 
@@ -552,13 +721,14 @@ function proposalLine(proposal: Proposal | null, gauge: Gauge | null): string {
 
 /** What /compact-warning prints. */
 export function reportText(report: Report): string {
-  const { gauge, limit, told, proposal, config, engineVersion, versionNote, lastError } = report
+  const { gauge, limit, told, proposal, settings, engineVersion, lastError } = report
 
   return [
-    healthText(versionNote, lastError),
+    healthText(lastError),
     contextLine(report),
-    `Nudges: ${nudgesAt(thresholdsOf(limit, config))}, ${TOLD_WORDS[told]}`,
-    `Compact without asking: ${config.isUnattended ? 'on' : 'off'}`,
+    `Nudges: ${nudgesAt(thresholdsOf(limit, settings))}, ${TOLD_WORDS[told]}`,
+    `Settings: ${settingsText(settings)}`,
+    `To change one: /${COMMAND} stop 300k`,
     `Claude Code: ${engineVersion ?? 'unknown version'}`,
     proposalLine(proposal, gauge),
   ].join('\n')

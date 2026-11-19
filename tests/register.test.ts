@@ -18,7 +18,10 @@ type World = {
   /** The token count where auto-compaction fires; undefined while it is off. */
   limit: number | undefined
   draft: string
-  tested: string | undefined
+  /** The Claude Code the session runs on. */
+  version: string
+  /** What the mod's store holds under its settings key at the start. */
+  settings: unknown
   isUsageBroken: boolean
   agents: AgentInfo[]
   isAgentListBroken: boolean
@@ -36,7 +39,8 @@ function world(on: On, start: Partial<World> = {}): World {
     tokens: undefined,
     limit: LIMIT,
     draft: '',
-    tested: VERSION,
+    version: VERSION,
+    settings: undefined,
     isUsageBroken: false,
     agents: [],
     isAgentListBroken: false,
@@ -49,9 +53,9 @@ function world(on: On, start: Partial<World> = {}): World {
     ...start,
   }
 
-  mock.store(on)
+  mock.store(on, w.settings === undefined ? {} : { settings: w.settings })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.version', () => ({ value: { version: VERSION } }))
+  on('session.version', () => ({ value: { version: w.version } }))
   on('session.usage', (_, e) => {
     if (w.isUsageBroken) {
       throw new Error('usage is gone')
@@ -82,13 +86,6 @@ function world(on: On, start: Partial<World> = {}): World {
     }
 
     return { value: w.agents }
-  })
-  on('fs.read', () => {
-    if (w.tested === undefined) {
-      throw new Error('no such file')
-    }
-
-    return { value: `${w.tested}\n` }
   })
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('command.register', () => ({ value: { command: 'compact-warning' } }))
@@ -136,6 +133,9 @@ const TURN_END = {
   isAborted: false,
   turnId: 't1',
 } as const
+const percent = (value: number) => ({ unit: 'percent', value }) as const
+const tokens = (value: number) => ({ unit: 'tokens', value }) as const
+
 const STATUS_COMMAND = {
   command: 'compact-warning',
   args: '',
@@ -177,6 +177,16 @@ async function greenLine($: Engine, surface: 'terminal' | 'desktop' = 'terminal'
   await ui.unmount()
 
   return line
+}
+
+/** The line that says the mod is off, when the row above the prompt has it. */
+async function offLine($: Engine) {
+  const ui = await band($)
+  const line = await ui.find({ type: 'Text', text: /^compact-warning is off$/ })
+  const detail = await ui.find({ type: 'Text', text: /^ · needs Claude Code/ })
+  await ui.unmount()
+
+  return { line, detail }
 }
 
 /** The dim detail beside the green line. */
@@ -230,13 +240,26 @@ test('the green line shows before the first response, and leaves at the first pr
   expect(await greenLine($)).toBeUndefined()
 })
 
-test('a start check that fails shows no green line', async ($, on) => {
+test('on a Claude Code older than the floor the mod is off, and says so', async ($, on) => {
   mock.clock(on)
-  const untested = world(on, { tokens: at(12), tested: '2.1.300' })
+  const w = world(on, { tokens: at(95), version: '2.1.311' })
   await $.session.start(START)
 
   expect(await greenLine($)).toBeUndefined()
-  expect(last(untested.statuses)).toContain('untested on Claude Code')
+  const { line, detail } = await offLine($)
+  expect(line?.props['color']).toBe('warning')
+  expect(detail?.text).toBe(' · needs Claude Code 2.1.325 or later, this is 2.1.311')
+
+  // No nudge, no status line, no toast: every hook passes its event on.
+  const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(ran.context ?? []).toEqual([])
+  await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'composer' } })
+  expect(w.prompts[0]?.context).toEqual([])
+  expect(w.statuses.every(text => text === '')).toBe(true)
+  expect(w.toasts).toEqual([])
+
+  const report = await $.command.run(STATUS_COMMAND)
+  expect(report.text).toContain('Health: off, needs Claude Code 2.1.325 or later, this is 2.1.311')
 })
 
 test('a broken context reading fails the start check', async ($, on) => {
@@ -256,19 +279,52 @@ test('a session with nobody at the prompt gets no green line', async ($, on) => 
   expect(await greenLine($)).toBeUndefined()
 })
 
-test('/compact-warning runs the checks again and prints the verdict', async ($, on) => {
+test('/compact-warning prints the report, and after a failure what to do', async ($, on) => {
   mock.clock(on)
-  const w = world(on, { tokens: at(12), tested: '2.1.300' })
+  const w = world(on, { tokens: at(12) })
   await $.session.start(START)
 
   const before = await $.command.run(STATUS_COMMAND)
-  expect(before.text).toContain(`Health: needs attention, untested on Claude Code ${VERSION}`)
+  expect(before.text).toContain('Health: working\nContext: 116k of 967k tokens, 12% of auto-compact')
+  expect(before.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off\n')
+  expect(before.text).toContain(`Claude Code: ${VERSION}`)
 
-  // tools/check passed in the meantime: the command reads the file again.
-  w.tested = VERSION
+  w.isUsageBroken = true
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  w.isUsageBroken = false
   const after = await $.command.run(STATUS_COMMAND)
-  expect(after.text).toContain('Health: working\n')
-  expect(last(w.statuses)).toBe('')
+  expect(after.text).toContain('Health: needs attention, error in tool.call:')
+  expect(after.text).toContain('For a fix, run: claude plugin update compact-warning@compact-warning')
+})
+
+test('/compact-warning changes a setting for every session, and puts the defaults back', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: 249_000 })
+  await $.session.start(START)
+
+  const set = await $.command.run({ ...STATUS_COMMAND, args: 'stop 300k' })
+  expect(set.text).toContain('Set stop to 300k.\n\nHealth: working')
+  expect(set.text).toContain('Nudges: at 300k tokens, none sent yet')
+  expect(set.text).toContain('Settings: warn 80%, stop 300k, reserve 30k, unattended off\n')
+  const both = await $.command.run({ ...STATUS_COMMAND, args: 'warn 250k' })
+  expect(both.text).toContain('Settings: warn 250k, stop 300k, reserve 30k, unattended off\n')
+  expect(both.text).toContain('Nudges: at 250k and 300k tokens, none sent yet')
+
+  // The change holds at once, without a reload.
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
+  w.tokens = 250_000
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'look for a good breakpoint',
+  )
+
+  const refused = await $.command.run({ ...STATUS_COMMAND, args: 'stop 80' })
+  expect(refused.text).toContain('Give stop a percentage such as 80%, or a token count such as 250k.')
+  expect(refused.text).toContain('/compact-warning reset')
+
+  const reset = await $.command.run({ ...STATUS_COMMAND, args: 'reset' })
+  expect(reset.text).toContain('Put the settings back to their defaults.')
+  expect(reset.text).toContain('Nudges: at 774k and 851k tokens')
+  expect(reset.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off\n')
 })
 
 test('each threshold is told once, with the tool result', async ($, on) => {
@@ -526,9 +582,9 @@ test('with no proposal a compaction runs unchanged', async ($, on) => {
   expect(w.compactions).toEqual([{ trigger: 'auto', instructions: undefined }])
 })
 
-test('unattended, the mod compacts and tells the session to go on', { options: { unattended: true } }, async ($, on) => {
+test('unattended, the mod compacts and tells the session to go on', async ($, on) => {
   const clock = mock.clock(on)
-  const w = world(on, { tokens: at(85) })
+  const w = world(on, { tokens: at(85), settings: { isUnattended: true } })
   await $.session.start(START)
   const stored = await propose($, 'Keep the plan.')
 
@@ -545,16 +601,21 @@ test('unattended, the mod compacts and tells the session to go on', { options: {
   ])
 })
 
-test('the percentages are options', { options: { warnPercent: 10, stopPercent: 20 } }, async ($, on) => {
-  world(on, { tokens: at(21) })
+test('the percentages are settings', async ($, on) => {
+  mock.clock(on)
+  world(on, { tokens: at(21), settings: { warn: percent(10), stop: percent(20) } })
   await $.session.start(START)
   const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
 
   expect(ran.context?.[0]).toContain('Stop at the next breakpoint')
 })
 
-test('a token count gives the nudge before the percentage', { options: { warnTokens: 250_000, stopTokens: 300_000 } }, async ($, on) => {
-  const w = world(on, { tokens: 249_000 })
+test('a nudge set as a token count comes at that size', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, {
+    tokens: 249_000,
+    settings: { warn: tokens(250_000), stop: tokens(300_000) },
+  })
   await $.session.start(START)
 
   expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
@@ -604,32 +665,6 @@ test('with auto-compaction off the mod measures against the window', async ($, o
   expect(last(w.statuses)).toBe('context window 80% full · looking for a breakpoint')
 })
 
-test('an installed copy, with no record of a tested version, skips the version check', async ($, on) => {
-  mock.clock(on)
-  const w = world(on, { tokens: at(12), tested: undefined })
-  await $.session.start(START)
-
-  expect(await greenLine($)).toBeDefined()
-  expect(w.toasts).toEqual([])
-  expect(w.statuses.every(text => text === '')).toBe(true)
-
-  const report = await $.command.run(STATUS_COMMAND)
-  expect(report.text).toContain('Health: working\n')
-  expect(report.text).toContain(`Claude Code: ${VERSION}`)
-})
-
-test('a Claude Code version the tests have not passed on shows in the status line', async ($, on) => {
-  const w = world(on, { tokens: at(10), tested: '2.1.300' })
-  await $.session.start(START)
-
-  expect(last(w.statuses)).toBe(
-    `context at 10% of auto-compact · untested on Claude Code ${VERSION}`,
-  )
-  expect(w.toasts[0]).toBe(
-    `Untested on Claude Code ${VERSION}. Run tools/check in the mod's folder.`,
-  )
-})
-
 test('a failure inside the mod shows, and the tool call still answers', async ($, on) => {
   const w = world(on, { tokens: at(85) })
   await $.session.start(START)
@@ -639,6 +674,7 @@ test('a failure inside the mod shows, and the tool call still answers', async ($
   expect(ran.deny).toBeUndefined()
   expect(last(w.statuses)).toContain('error in tool.call:')
   expect(last(w.toasts)).toContain('Error in tool.call:')
+  expect(last(w.toasts)).toContain('Run /compact-warning for what to do.')
 })
 
 test('a /clear forgets the proposal', async ($, on) => {

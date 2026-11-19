@@ -29,11 +29,13 @@ export type Gauge = {
   isAutoCompact?: boolean
 }
 
-/** The line that says the start check passed, shown for a few seconds. */
+/** The line of the start check, shown for a few seconds. */
 export type Greeting = {
   text: string
   /** The rest of the line, drawn dim. Absent in a value of an older version. */
   detail?: string
+  /** True when the line says that the mod is off on this Claude Code. */
+  isOff?: boolean
   /** When the line leaves, in milliseconds since the epoch. */
   until: number
 }

@@ -2,30 +2,40 @@ import { expect, test } from 'claude-code/testing'
 import type { AgentInfo, AgentStatus } from 'claude-code'
 
 import {
+  DEFAULT_SETTINGS,
   MAX_INSTRUCTIONS,
   MAX_NAMED,
+  MIN_VERSION,
+  USAGE,
   ageOf,
   cleanInstructions,
   compactLine,
-  configOf,
   endedIn,
+  errorToast,
   gaugeOf,
   greetingText,
   hasShrunk,
   healthText,
   instructionsFor,
+  isOlder,
   isStronger,
   isUnfinished,
   levelOf,
   nudgeText,
+  offGreeting,
+  offReport,
   readyHint,
   readyText,
   refusalOf,
   reportText,
+  requestOf,
   runningOf,
   runningText,
+  settingsOf,
+  settingsText,
   statusText,
   stoppedOf,
+  storedOf,
   storedText,
   taskOf,
   thresholdsOf,
@@ -33,79 +43,163 @@ import {
   tokensText,
   unfinishedOf,
 } from '../hooks/logic'
-import type { Report, Task } from '../hooks/logic'
+import type { Report, Settings, Task } from '../hooks/logic'
 
 /** The auto-compaction point of a 1M window, and of a 200k window. */
 const LARGE = 967_000
 const SMALL = 167_000
 
-test('the options default to 80% and 88%, a reserve of 30 000 tokens, attended', () => {
-  expect(configOf({})).toEqual({
-    warnPercent: 80,
-    stopPercent: 88,
-    warnTokens: 0,
-    stopTokens: 0,
+const percent = (value: number) => ({ unit: 'percent', value }) as const
+const tokens = (value: number) => ({ unit: 'tokens', value }) as const
+const withSettings = (change: Partial<Settings>): Settings => ({ ...DEFAULT_SETTINGS, ...change })
+
+test('the settings default to 80% and 88%, a reserve of 30 000 tokens, attended', () => {
+  expect(settingsOf(undefined)).toEqual({
+    warn: percent(80),
+    stop: percent(88),
     reserveTokens: 30_000,
     isUnattended: false,
   })
+  expect(settingsText(DEFAULT_SETTINGS)).toBe('warn 80%, stop 88%, reserve 30k, unattended off')
 })
 
-test('an option outside its range is pulled back in', () => {
-  const config = configOf({
-    warnPercent: 0,
-    stopPercent: 250,
-    warnTokens: -5,
-    stopTokens: 300_000.4,
-    reserveTokens: 'many',
-    unattended: true,
-  })
-
-  expect(config).toEqual({
-    warnPercent: 1,
-    stopPercent: 99,
-    warnTokens: 0,
-    stopTokens: 300_000,
+test('the store keeps only what the person changed, and a broken value is left out', () => {
+  expect(settingsOf({ stop: tokens(300_000), isUnattended: true })).toEqual({
+    warn: percent(80),
+    stop: tokens(300_000),
     reserveTokens: 30_000,
     isUnattended: true,
   })
+  expect(
+    storedOf({
+      warn: percent(250),
+      stop: { unit: 'tokens', value: 0 },
+      reserveTokens: -5,
+      isUnattended: 'yes',
+      other: 1,
+    }),
+  ).toEqual({})
+  expect(storedOf('not an object')).toEqual({})
+  expect(storedOf({ reserveTokens: 0 })).toEqual({ reserveTokens: 0 })
+})
+
+test('the command reads a setting and its value', () => {
+  expect(requestOf('')).toEqual({ kind: 'report' })
+  expect(requestOf('  reset ')).toEqual({ kind: 'reset' })
+  expect(requestOf('stop 300k')).toEqual({
+    kind: 'set',
+    change: { stop: tokens(300_000) },
+    said: 'Set stop to 300k.',
+  })
+  expect(requestOf('WARN 75%')).toEqual({
+    kind: 'set',
+    change: { warn: percent(75) },
+    said: 'Set warn to 75%.',
+  })
+  expect(requestOf('stop 1.2M')).toEqual({
+    kind: 'set',
+    change: { stop: tokens(1_200_000) },
+    said: 'Set stop to 1.2M.',
+  })
+  expect(requestOf('reserve 20k')).toEqual({
+    kind: 'set',
+    change: { reserveTokens: 20_000 },
+    said: 'Set reserve to 20k.',
+  })
+  expect(requestOf('reserve 0')).toEqual({
+    kind: 'set',
+    change: { reserveTokens: 0 },
+    said: 'Set reserve to 0.',
+  })
+  expect(requestOf('unattended on')).toEqual({
+    kind: 'set',
+    change: { isUnattended: true },
+    said: 'Set unattended to on.',
+  })
+})
+
+test('the command refuses what it cannot read, and says why', () => {
+  // A bare small number could be a percentage or a token count.
+  expect(requestOf('stop 80')).toEqual({
+    kind: 'refuse',
+    why: 'Give stop a percentage such as 80%, or a token count such as 250k.',
+  })
+  expect(requestOf('warn 0%').kind).toBe('refuse')
+  expect(requestOf('stop').kind).toBe('refuse')
+  expect(requestOf('reserve lots')).toEqual({
+    kind: 'refuse',
+    why: 'Give reserve a token count such as 30k, or 0 for none.',
+  })
+  expect(requestOf('unattended maybe')).toEqual({
+    kind: 'refuse',
+    why: 'Give unattended the value on or off.',
+  })
+  expect(requestOf('stop 300k now')).toEqual({ kind: 'refuse', why: 'Give one setting and one value.' })
+  expect(requestOf('colour blue')).toEqual({ kind: 'refuse', why: 'There is no setting "colour".' })
+  expect(USAGE).toContain('/compact-warning stop 88%')
+})
+
+test('a Claude Code older than the floor is told apart', () => {
+  expect(MIN_VERSION).toBe('2.1.325')
+  expect(isOlder('2.1.311', MIN_VERSION)).toBe(true)
+  expect(isOlder('2.0.999', MIN_VERSION)).toBe(true)
+  expect(isOlder('2.1.325', MIN_VERSION)).toBe(false)
+  expect(isOlder('2.1.328', MIN_VERSION)).toBe(false)
+  expect(isOlder('2.2.0', MIN_VERSION)).toBe(false)
+  expect(isOlder('3.0.0', MIN_VERSION)).toBe(false)
+  // A development build counts by the release it is built from.
+  expect(isOlder('2.1.311-dev.20261026.t101500.sha1a2b3c4', MIN_VERSION)).toBe(true)
+  // A version that cannot be read turns nothing off.
+  expect(isOlder('nightly', MIN_VERSION)).toBe(false)
+})
+
+test('below the floor the start line and the report say that the mod is off', () => {
+  expect(offGreeting('2.1.311')).toEqual({
+    text: 'compact-warning is off',
+    detail: ' · needs Claude Code 2.1.325 or later, this is 2.1.311',
+    isOff: true,
+  })
+  expect(offReport('2.1.311')).toBe(
+    'Health: off, needs Claude Code 2.1.325 or later, this is 2.1.311\nUpdate Claude Code to turn the mod on. Its stable channel gets a version later than its latest channel.',
+  )
 })
 
 test('on a large window the nudges come at their percentages', () => {
-  expect(thresholdsOf(LARGE, configOf({}))).toEqual({ warn: 773_600, stop: 850_960 })
+  expect(thresholdsOf(LARGE, DEFAULT_SETTINGS)).toEqual({ warn: 773_600, stop: 850_960 })
 })
 
 test('on a small window both nudges come earlier, and the reserve remains', () => {
   // 88% would leave 20 040 tokens. Both nudges move 9 960 tokens earlier.
-  expect(thresholdsOf(SMALL, configOf({}))).toEqual({ warn: 123_640, stop: 137_000 })
-  expect(thresholdsOf(SMALL, configOf({ reserveTokens: 0 }))).toEqual({
+  expect(thresholdsOf(SMALL, DEFAULT_SETTINGS)).toEqual({ warn: 123_640, stop: 137_000 })
+  expect(thresholdsOf(SMALL, withSettings({ reserveTokens: 0 }))).toEqual({
     warn: 133_600,
     stop: 146_960,
   })
   // The reserve takes a quarter of the limit at most.
-  expect(thresholdsOf(60_000, configOf({})).stop).toBe(45_000)
+  expect(thresholdsOf(60_000, DEFAULT_SETTINGS).stop).toBe(45_000)
 })
 
-test('a token count gives a nudge when it comes before the percentage', () => {
-  const config = configOf({ warnTokens: 250_000, stopTokens: 300_000 })
+test('a nudge set as a token count comes at that size', () => {
+  const settings = withSettings({ warn: tokens(250_000), stop: tokens(300_000) })
 
-  expect(thresholdsOf(LARGE, config)).toEqual({ warn: 250_000, stop: 300_000 })
-  // Past the small window's own nudges, the token counts change nothing.
-  expect(thresholdsOf(SMALL, config)).toEqual({ warn: 123_640, stop: 137_000 })
+  expect(thresholdsOf(LARGE, settings)).toEqual({ warn: 250_000, stop: 300_000 })
+  // It never comes later than its default percentage: a small window is covered.
+  expect(thresholdsOf(SMALL, settings)).toEqual({ warn: 123_640, stop: 137_000 })
 })
 
 test('the first nudge never comes after the second', () => {
-  expect(thresholdsOf(LARGE, configOf({ stopTokens: 300_000 }))).toEqual({
+  expect(thresholdsOf(LARGE, withSettings({ stop: tokens(300_000) }))).toEqual({
     warn: 300_000,
     stop: 300_000,
   })
-  expect(thresholdsOf(LARGE, configOf({ warnPercent: 90, stopPercent: 70 }))).toEqual({
+  expect(thresholdsOf(LARGE, withSettings({ warn: percent(90), stop: percent(70) }))).toEqual({
     warn: 676_900,
     stop: 676_900,
   })
 })
 
 test('the level follows the nudges', () => {
-  const thresholds = thresholdsOf(LARGE, configOf({}))
+  const thresholds = thresholdsOf(LARGE, DEFAULT_SETTINGS)
 
   expect(levelOf(773_599, thresholds)).toBe('none')
   expect(levelOf(773_600, thresholds)).toBe('warn')
@@ -180,16 +274,13 @@ test('the toast says what Claude is doing', () => {
   expect(toastText('stop', gaugeOf(900, 1000))).toBe(
     'Context at 90% of auto-compact. Claude will stop at the next breakpoint.',
   )
+  expect(errorToast('tool.call: boom')).toBe(
+    'Error in tool.call: boom. Run /compact-warning for what to do.',
+  )
 })
 
 test('the status line says what the mod is doing', () => {
-  const base = {
-    told: 'none',
-    hasProposal: false,
-    age: 0,
-    versionNote: undefined,
-    lastError: undefined,
-  } as const
+  const base = { told: 'none', hasProposal: false, age: 0, lastError: undefined } as const
 
   // Before the first nudge, with nothing wrong, there is no line at all.
   expect(statusText({ ...base, gauge: null })).toBeUndefined()
@@ -206,27 +297,21 @@ test('the status line says what the mod is doing', () => {
   expect(
     statusText({ ...base, gauge: gaugeOf(900, 1000), hasProposal: true, age: 18_400 }),
   ).toBe('context at 90% of auto-compact · /compact ready, saved 18k tokens ago')
-  expect(
-    statusText({ ...base, gauge: null, versionNote: 'untested on Claude Code 9.9.9' }),
-  ).toBe('untested on Claude Code 9.9.9')
   expect(statusText({ ...base, gauge: null, lastError: 'tool.call: boom' })).toBe(
     'error in tool.call: boom',
   )
-  expect(
-    statusText({
-      ...base,
-      gauge: gaugeOf(420, 1000),
-      versionNote: 'untested on Claude Code 9.9.9',
-    }),
-  ).toBe('context at 42% of auto-compact · untested on Claude Code 9.9.9')
+  expect(statusText({ ...base, gauge: gaugeOf(420, 1000), lastError: 'tool.call: boom' })).toBe(
+    'context at 42% of auto-compact · error in tool.call: boom',
+  )
 })
 
 test('the green line names the nudges and the auto-compaction point', () => {
-  expect(greetingText(LARGE, true, thresholdsOf(LARGE, configOf({})))).toEqual({
+  expect(greetingText(LARGE, true, thresholdsOf(LARGE, DEFAULT_SETTINGS))).toEqual({
     text: '✓ compact-warning is working',
     detail: ' · nudges at 774k and 851k tokens · auto-compact at 967k',
+    isOff: false,
   })
-  expect(greetingText(SMALL, true, thresholdsOf(SMALL, configOf({}))).detail).toBe(
+  expect(greetingText(SMALL, true, thresholdsOf(SMALL, DEFAULT_SETTINGS)).detail).toBe(
     ' · nudges at 124k and 137k tokens · auto-compact at 167k',
   )
   expect(greetingText(LARGE, true, { warn: 300_000, stop: 300_000 }).detail).toBe(
@@ -249,19 +334,15 @@ const REPORT: Report = {
   isAutoCompact: true,
   told: 'none',
   proposal: null,
-  config: configOf({}),
+  settings: DEFAULT_SETTINGS,
   engineVersion: '2.1.325',
-  versionNote: undefined,
   lastError: undefined,
 }
 
-test('the report opens with the verdict of the checks', () => {
-  expect(healthText(undefined, undefined)).toBe('Health: working')
-  expect(healthText('untested on Claude Code 9.9.9', undefined)).toBe(
-    "Health: needs attention, untested on Claude Code 9.9.9 (run tools/check in the mod's folder)",
-  )
-  expect(healthText(undefined, 'tool.call: boom')).toBe(
-    'Health: needs attention, error in tool.call: boom',
+test('the report opens with the verdict of the checks, and what to do', () => {
+  expect(healthText(undefined)).toBe('Health: working')
+  expect(healthText('tool.call: boom')).toBe(
+    'Health: needs attention, error in tool.call: boom\nFor a fix, run: claude plugin update compact-warning@compact-warning',
   )
 })
 
@@ -271,7 +352,8 @@ test('the report is one fact to a line', () => {
       'Health: working',
       'Context: 116k of 967k tokens, 12% of auto-compact',
       'Nudges: at 774k and 851k tokens, none sent yet',
-      'Compact without asking: off',
+      'Settings: warn 80%, stop 88%, reserve 30k, unattended off',
+      'To change one: /compact-warning stop 300k',
       'Claude Code: 2.1.325',
       'Proposal: none',
     ].join('\n'),
@@ -281,10 +363,12 @@ test('the report is one fact to a line', () => {
     ...REPORT,
     gauge: gaugeOf(880_000, LARGE),
     told: 'stop',
+    settings: withSettings({ stop: tokens(860_000), isUnattended: true }),
     proposal: { instructions: 'Keep the plan.', tokens: 860_000, isHandedOver: true },
   })
 
   expect(waiting).toContain('Nudges: at 774k and 851k tokens, second sent')
+  expect(waiting).toContain('Settings: warn 80%, stop 860k, reserve 30k, unattended on\n')
   expect(waiting).toContain('Proposal: ready for /compact, saved 20k tokens ago\nKeep the plan.')
 
   expect(reportText({ ...REPORT, gauge: null })).toContain(

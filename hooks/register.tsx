@@ -18,36 +18,45 @@ import {
   COMMAND,
   INSTRUCTIONS_DESCRIPTION,
   MAX_TASKS,
+  MIN_VERSION,
   PRECOMPUTE_SKIP,
   RESUME_PROMPT,
+  SETTINGS_KEY,
   STALE_NOTE,
   TOOL_DESCRIPTION,
   TOOL_NAME,
+  USAGE,
   ageOf,
   cleanInstructions,
   compactLine,
-  configOf,
   endedIn,
+  errorToast,
   gaugeOf,
   greetingText,
   hasShrunk,
   instructionsFor,
+  isOlder,
   isStronger,
   levelOf,
   nudgeText,
+  offGreeting,
+  offReport,
   readyHint,
   readyText,
   refusalOf,
   reportText,
+  requestOf,
   runningOf,
+  settingsOf,
   statusText,
   stoppedOf,
+  storedOf,
   storedText,
   taskOf,
   thresholdsOf,
   toastText,
 } from './logic'
-import type { Config, GreetingText, Task } from './logic'
+import type { GreetingText, Settings, StoredSettings, Task } from './logic'
 
 type Engine = EngineInterface
 
@@ -61,23 +70,22 @@ const gauge = atom({ plugin: 'compact-warning', key: 'gauge' } as const, null)
 const isRowHidden = atom({ plugin: 'compact-warning', key: 'isRowHidden' } as const, false)
 const greeting = atom({ plugin: 'compact-warning', key: 'greeting' } as const, null)
 
-/**
- * The file tools/check writes in a working copy: the Claude Code version the
- * checks passed on. A copy installed from a repository has none.
- */
-const TESTED_VERSION_FILE = 'tested-version.txt'
-const WARNED_VERSION_KEY = 'warnedVersion'
-
 /** How long the auto-compaction point is trusted before it is read again. */
 const LIMIT_TTL_MS = 5 * 60 * 1000
 /** After this long, a reading that never finished no longer holds others back. */
 const SENSE_STALE_MS = 30 * 1000
+/**
+ * How long the settings are trusted before the store is read again: a change
+ * made in one session reaches the others within this time.
+ */
+const SETTINGS_TTL_MS = 10 * 1000
 /** The wait between the end of a turn and an unattended compaction. */
 const UNATTENDED_DELAY_MS = 500
 const LONG_TOAST_MS = 10 * 1000
-/** How long the green line of a passed start check stays above the prompt. */
+/** How long the line of the start check stays above the prompt. */
 const GREETING_MS = 10 * 1000
 const ERROR_LENGTH = 160
+const COMMAND_DESCRIPTION = 'Show how close this session is to auto-compaction, or change a setting'
 
 /** What the context is measured against. */
 type Limit = {
@@ -87,9 +95,14 @@ type Limit = {
 }
 
 let limitCache: (Limit & { window: number; at: number }) | undefined
+let settingsCache: { settings: Settings; at: number } | undefined
 let senseStartedAt: number | undefined
 let engineVersion: string | undefined
-let versionNote: string | undefined
+/**
+ * True on a Claude Code older than the mod's floor. The mod is then off: its
+ * hooks pass every event on, and the start line and the report say why.
+ */
+let isOff = false
 let lastError: string | undefined
 
 /**
@@ -150,13 +163,48 @@ async function guarded<T>(
 
     if (line !== lastError) {
       lastError = line
-      $.ui.toast(`Error in ${line}`, { timeoutMs: LONG_TOAST_MS })
+      $.ui.toast(errorToast(line), { timeoutMs: LONG_TOAST_MS })
     }
 
     $.ui.status(`error in ${line}`)
 
     return undefined
   }
+}
+
+/**
+ * The settings in force, read from the store at most every few seconds. A
+ * store that cannot be read holds no nudge back: the defaults then apply.
+ */
+async function settingsNow($: Engine): Promise<Settings> {
+  const now = Date.now()
+
+  if (settingsCache !== undefined && now - settingsCache.at < SETTINGS_TTL_MS) {
+    return settingsCache.settings
+  }
+
+  let stored: unknown
+
+  try {
+    stored = await $.store.get(SETTINGS_KEY)
+  } catch {
+    stored = undefined
+  }
+
+  settingsCache = { settings: settingsOf(stored), at: now }
+
+  return settingsCache.settings
+}
+
+/** Saves a change to the settings, or with no change puts the defaults back. */
+async function saveSettings($: Engine, change?: StoredSettings): Promise<void> {
+  if (change === undefined) {
+    await $.store.delete(SETTINGS_KEY)
+  } else {
+    await $.store.set(SETTINGS_KEY, { ...storedOf(await $.store.get(SETTINGS_KEY)), ...change })
+  }
+
+  settingsCache = undefined
 }
 
 /** What the context is measured against, read at most every few minutes. */
@@ -214,7 +262,6 @@ async function show($: Engine, reading: Gauge | null): Promise<void> {
       told: await read($, told),
       hasProposal: stored !== null,
       age: ageOf(stored, reading),
-      versionNote,
       lastError,
     }),
   )
@@ -263,7 +310,7 @@ async function greet($: Engine, line: GreetingText): Promise<void> {
  * Reads the fill and answers the note for the model when it has reached a
  * nudge the model has not had yet. Of several calls at once, one reads.
  */
-async function sense($: Engine, config: Config): Promise<string | undefined> {
+async function sense($: Engine): Promise<string | undefined> {
   const now = Date.now()
 
   if (senseStartedAt !== undefined && now - senseStartedAt < SENSE_STALE_MS) {
@@ -290,7 +337,7 @@ async function sense($: Engine, config: Config): Promise<string | undefined> {
     }
 
     const before = await read($, told)
-    const thresholds = thresholdsOf(reading.limit, config)
+    const thresholds = thresholdsOf(reading.limit, await settingsNow($))
     const level = levelOf(reading.tokens, thresholds)
     let note: string | undefined
 
@@ -310,10 +357,10 @@ async function sense($: Engine, config: Config): Promise<string | undefined> {
   }
 }
 
-async function notesAtPrompt($: Engine, config: Config): Promise<string[]> {
-  // The person is at the prompt and has seen the green line.
+async function notesAtPrompt($: Engine): Promise<string[]> {
+  // The person is at the prompt and has seen the line of the start check.
   await endGreeting($)
-  const note = await sense($, config)
+  const note = await sense($)
   const stored = await read($, proposal)
   const notes = note === undefined ? [] : [note]
 
@@ -360,7 +407,7 @@ async function compactUnattended($: Engine): Promise<void> {
 }
 
 /** At the end of a main-conversation turn: offer the proposal, once. */
-async function handOver($: Engine, config: Config, hasAnswered: boolean): Promise<void> {
+async function handOver($: Engine, hasAnswered: boolean): Promise<void> {
   await refresh($)
   const stored = await read($, proposal)
 
@@ -368,7 +415,7 @@ async function handOver($: Engine, config: Config, hasAnswered: boolean): Promis
     return
   }
 
-  if (config.isUnattended && hasAnswered) {
+  if ((await settingsNow($)).isUnattended && hasAnswered) {
     $.clock.after(UNATTENDED_DELAY_MS, () => {
       void guarded($, 'the unattended compaction', () => compactUnattended($))
     })
@@ -393,47 +440,62 @@ async function handOver($: Engine, config: Config, hasAnswered: boolean): Promis
 }
 
 /**
- * In a working copy, compares the running Claude Code with the version the
- * checks passed on. An installed copy has no such record and no checks to
- * run: there the start check alone says whether the mod works.
+ * Reads the running Claude Code's version and settles whether the mod is on.
+ * A Claude Code from 2.1.323 on reads the manifest's `engines` and never loads
+ * a mod it is too old for. An older one loads it, so the mod checks by itself.
  */
-async function checkVersion($: Engine): Promise<void> {
+async function checkFloor($: Engine): Promise<void> {
   const { version } = await $.session.version()
   engineVersion = version
-  let tested: string | undefined
-
-  try {
-    tested = (await $.fs.read(`${$.plugin.root}/${TESTED_VERSION_FILE}`)).trim()
-  } catch {
-    tested = undefined
-  }
-
-  if (tested === undefined || tested === version) {
-    versionNote = undefined
-
-    return
-  }
-
-  versionNote = `untested on Claude Code ${version}`
-
-  if ((await $.store.get(WARNED_VERSION_KEY)) !== version) {
-    await $.store.set(WARNED_VERSION_KEY, version)
-    $.ui.toast(
-      `Untested on Claude Code ${version}. Run tools/check in the mod's folder.`,
-      { timeoutMs: LONG_TOAST_MS },
-    )
-  }
+  isOff = isOlder(version, MIN_VERSION)
 }
 
-export const register: Register = (on, options) => {
-  const config = configOf(options)
+/** The report, after the same readings as at the start. */
+async function report($: Engine): Promise<string> {
+  const { reading, limit, isAutoCompact } = await inspect($)
+  await show($, reading)
 
+  return reportText({
+    gauge: reading,
+    limit,
+    isAutoCompact,
+    told: await read($, told),
+    proposal: await read($, proposal),
+    settings: await settingsNow($),
+    engineVersion,
+    lastError,
+  })
+}
+
+export const register: Register = on => {
   // The start of a new or resumed session, and a reload of the mod. This is
   // also the health check: each step below is a part the mod relies on, and
   // the green line shows only when every one answered.
   on('session.start', async ($, e, next) => {
     await guarded($, 'session.start', async () => {
       await update($, greeting, () => null)
+      // First of all: on a Claude Code that is too old, nothing below is sure
+      // to work, and the mod must not half-run.
+      await checkFloor($)
+
+      if (isOff) {
+        $.ui.status(undefined)
+        // The command says why the mod is off. The start line does not depend
+        // on it: an old Claude Code may refuse the way it is declared.
+        await $.command.register({ name: COMMAND, description: COMMAND_DESCRIPTION }).catch(() => undefined)
+
+        if (e.isInteractive && engineVersion !== undefined) {
+          await greet($, offGreeting(engineVersion))
+        }
+
+        return
+      }
+
+      await $.command.register({
+        name: COMMAND,
+        description: COMMAND_DESCRIPTION,
+        argumentHint: '[setting value]',
+      })
       await $.tool.register({
         name: TOOL_NAME,
         description: TOOL_DESCRIPTION,
@@ -445,16 +507,12 @@ export const register: Register = (on, options) => {
           required: ['instructions'],
         },
       })
-      await $.command.register({
-        name: COMMAND,
-        description: 'Show how close this session is to auto-compaction',
-      })
-      await checkVersion($)
       const { reading, limit, isAutoCompact } = await inspect($)
       await show($, reading)
 
-      if (e.isInteractive && versionNote === undefined && lastError === undefined) {
-        await greet($, greetingText(limit, isAutoCompact, thresholdsOf(limit, config)))
+      if (e.isInteractive && lastError === undefined) {
+        const thresholds = thresholdsOf(limit, await settingsNow($))
+        await greet($, greetingText(limit, isAutoCompact, thresholds))
       }
     })
 
@@ -467,13 +525,13 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
 
-    if (e.agentId !== undefined || OWN_TOOL.test(e.tool) || ran.deny !== undefined) {
+    if (isOff || e.agentId !== undefined || OWN_TOOL.test(e.tool) || ran.deny !== undefined) {
       return ran
     }
 
     track(e, ran.result)
 
-    const note = await guarded($, 'tool.call', () => sense($, config), next.signal)
+    const note = await guarded($, 'tool.call', () => sense($), next.signal)
 
     return note === undefined ? ran : { ...ran, context: [...(ran.context ?? []), note] }
   })
@@ -506,7 +564,7 @@ export const register: Register = (on, options) => {
       const running = runningOf(agents ?? [], [...tasks.values()])
       await show($, reading)
 
-      return { result: storedText(reading, config.isUnattended, running) }
+      return { result: storedText(reading, (await settingsNow($)).isUnattended, running) }
     } catch (error) {
       return { deny: `compact-warning could not store the proposal: ${messageOf(error)}` }
     }
@@ -527,16 +585,11 @@ export const register: Register = (on, options) => {
       }
     }
 
-    if (e.command !== undefined || e.isMeta === true) {
+    if (isOff || e.command !== undefined || e.isMeta === true) {
       return next(e)
     }
 
-    const notes = await guarded(
-      $,
-      'prompt.submit',
-      () => notesAtPrompt($, config),
-      next.signal,
-    )
+    const notes = await guarded($, 'prompt.submit', () => notesAtPrompt($), next.signal)
 
     return notes === undefined || notes.length === 0
       ? next(e)
@@ -546,13 +599,8 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
 
-    if (e.agentId === undefined) {
-      await guarded(
-        $,
-        'turn.complete',
-        () => handOver($, config, e.reason === 'answer'),
-        next.signal,
-      )
+    if (!isOff && e.agentId === undefined) {
+      await guarded($, 'turn.complete', () => handOver($, e.reason === 'answer'), next.signal)
     }
 
     return done
@@ -561,7 +609,7 @@ export const register: Register = (on, options) => {
   // Every compaction of the main conversation: when none were typed, pass on
   // the stored instructions. Never skip a real one: a full window is worse.
   on('session.compact', async ($, e, next) => {
-    if (e.agentId !== undefined) {
+    if (isOff || e.agentId !== undefined) {
       return next(e)
     }
 
@@ -596,7 +644,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
+    if (!isOff && e.reason === 'clear') {
       await guarded($, 'session.end', () => reset($))
     }
 
@@ -604,34 +652,40 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
-    if (e.changed.includes('context')) {
+    if (!isOff && e.changed.includes('context')) {
       await guarded($, 'session.measure', () => refresh($), next.signal)
     }
 
     return next(e)
   })
 
-  on('command.run', { command: COMMAND }, async $ => {
-    // The health check on demand: the same readings as at the start.
-    const text = await guarded($, 'the status command', async () => {
-      await checkVersion($)
-      const { reading, limit, isAutoCompact } = await inspect($)
-      await show($, reading)
+  // The report, which is also the health check on demand, or a change to a
+  // setting. A change is saved for every session, and answers with the report.
+  on('command.run', { command: COMMAND }, async ($, e) => {
+    const text = await guarded($, 'the command', async () => {
+      await checkFloor($)
 
-      return reportText({
-        gauge: reading,
-        limit,
-        isAutoCompact,
-        told: await read($, told),
-        proposal: await read($, proposal),
-        config,
-        engineVersion,
-        versionNote,
-        lastError,
-      })
+      if (isOff) {
+        return offReport(engineVersion ?? '')
+      }
+
+      const request = requestOf(e.args)
+
+      if (request.kind === 'refuse') {
+        return `${request.why}\n\n${USAGE}`
+      }
+
+      if (request.kind === 'report') {
+        return report($)
+      }
+
+      await saveSettings($, request.kind === 'reset' ? undefined : request.change)
+      const said = request.kind === 'reset' ? 'Put the settings back to their defaults.' : request.said
+
+      return `${said}\n\n${await report($)}`
     })
 
-    return { text: text ?? `Health: needs attention, error in ${lastError ?? 'the status command'}` }
+    return { text: text ?? `Health: needs attention, error in ${lastError ?? 'the command'}` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -642,7 +696,7 @@ export const register: Register = (on, options) => {
     const stored = await read($, proposal)
     const isOffered = stored !== null && stored.isHandedOver && !(await read($, isRowHidden))
 
-    // No proposal waits: the row is free for the green line of the start check.
+    // No proposal waits: the row is free for the line of the start check.
     if (!isOffered) {
       const hello = await read($, greeting)
 
@@ -655,7 +709,7 @@ export const register: Register = (on, options) => {
       return (
         <Box>
           <Text>
-            <Text color="success">{hello.text}</Text>
+            <Text color={hello.isOff === true ? 'warning' : 'success'}>{hello.text}</Text>
             <Text dimColor>{hello.detail ?? ''}</Text>
           </Text>
         </Box>
