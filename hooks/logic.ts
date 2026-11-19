@@ -10,8 +10,18 @@ export const TOOL_NAME = 'propose_compact'
 export const TOOL = 'mcp__compact-warning__propose_compact'
 export const COMMAND = 'compact-warning'
 
-/** The longest instructions the tool takes, in characters. */
-export const MAX_INSTRUCTIONS = 4000
+/**
+ * The length of instructions the model is told to aim for, in characters.
+ * It writes up to the number it is given, and over it by up to a fifth.
+ */
+export const AIM_INSTRUCTIONS = 3000
+
+/**
+ * The longest instructions the tool takes. The model is not told this number:
+ * it is room for the overshoot, so that a draft is not written twice when the
+ * context is nearly full.
+ */
+export const MAX_INSTRUCTIONS = 4500
 
 /** Growth of the context, in tokens, after which a stored proposal is old. */
 export const STALE_TOKENS = 5000
@@ -364,7 +374,10 @@ export function refusalOf(instructions: string): string | undefined {
   }
 
   if (instructions.length > MAX_INSTRUCTIONS) {
-    return `The instructions are ${instructions.length} characters long. Shorten them to ${MAX_INSTRUCTIONS} or fewer: point at the state document instead of repeating it.`
+    // A share to cut is easier to hit than a count of characters.
+    const cut = Math.ceil((10 * (instructions.length - AIM_INSTRUCTIONS)) / instructions.length) * 10
+
+    return `The instructions are ${instructions.length} characters long, and the aim is ${AIM_INSTRUCTIONS}. Cut them by about ${cut}%: point at the state document instead of repeating it.`
   }
 
   return undefined
@@ -656,8 +669,67 @@ export function readyHint(age: number): string {
   return ` Run /compact: the saved instructions apply.${old}`
 }
 
+/** Where a copy that Claude Code installed from a marketplace lives. */
+export type Install = {
+  /** Claude Code's configuration folder. */
+  configDir: string
+  /** The marketplace the copy came from, as Claude Code names it. */
+  marketplace: string
+}
+
+// <config>/plugins/cache/<marketplace>/<plugin>/<version>, with either slash.
+const INSTALLED = /^(.+)[\\/]plugins[\\/]cache[\\/]([^\\/]+)[\\/][^\\/]+[\\/][^\\/]+[\\/]?$/
+
+/**
+ * Reads where the mod was installed from its own folder. Undefined for a copy
+ * that Claude Code reads in place: a local folder, or one named at the start.
+ */
+export function installOf(root: string): Install | undefined {
+  const found = INSTALLED.exec(root)
+  const [, configDir, marketplace] = found ?? []
+
+  return configDir === undefined || marketplace === undefined ? undefined : { configDir, marketplace }
+}
+
+/**
+ * True when Claude Code updates the marketplace's plugins by itself. `declared`
+ * is the settings' `extraKnownMarketplaces`, and `known` is Claude Code's own
+ * record of its marketplaces. An entry in the settings wins. With neither, a
+ * marketplace like this one is updated by hand.
+ */
+export function isAutoUpdated(marketplace: string, declared: unknown, known: unknown): boolean {
+  const inSettings = field(field(declared, marketplace), 'autoUpdate')
+
+  return typeof inSettings === 'boolean'
+    ? inSettings
+    : field(field(known, marketplace), 'autoUpdate') === true
+}
+
+/** How updates reach an installed copy. */
+export type Updates = { marketplace: string; isAutomatic: boolean }
+
 /** How a person gets a newer version of the mod. */
-export const UPDATE_COMMAND = `claude plugin update ${COMMAND}@${COMMAND}`
+export function updateCommand(marketplace: string = COMMAND): string {
+  return `claude plugin update ${COMMAND}@${marketplace}`
+}
+
+/** What the one notice says to a person whose copy is updated by hand. */
+export const UPDATES_NOTICE = `Fixes do not reach this mod by themselves. /${COMMAND} says how to change that.`
+
+/** The store's key that says the notice about updates was given. */
+export const UPDATES_TOLD_KEY = 'toldAboutUpdates'
+
+/** True when the notice about updates is due: once, for a copy updated by hand. */
+export function isNoticeDue(updates: Updates | undefined, told: unknown): boolean {
+  return updates !== undefined && !updates.isAutomatic && told !== true
+}
+
+/** The report's line on updates, with the way to make them automatic. */
+export function updatesText(updates: Updates): string {
+  return updates.isAutomatic
+    ? 'Updates: automatic'
+    : `Updates: by hand. For fixes by themselves: /plugin, Marketplaces, ${updates.marketplace}, Turn on auto-update`
+}
 
 /** What the toast says when a hook of the mod has failed. */
 export function errorToast(lastError: string): string {
@@ -665,10 +737,10 @@ export function errorToast(lastError: string): string {
 }
 
 /** The start of the report: the verdict of the checks, and what to do. */
-export function healthText(lastError: string | undefined): string {
+export function healthText(lastError: string | undefined, marketplace?: string): string {
   return lastError === undefined
     ? 'Health: working'
-    : `Health: needs attention, error in ${lastError}\nFor a fix, run: ${UPDATE_COMMAND}`
+    : `Health: needs attention, error in ${lastError}\nFor a fix, run: ${updateCommand(marketplace)}`
 }
 
 /** What /compact-warning prints on a Claude Code older than the mod's floor. */
@@ -684,6 +756,8 @@ export type Report = {
   proposal: Proposal | null
   settings: Settings
   engineVersion: string | undefined
+  /** Undefined for a copy that Claude Code reads in place. */
+  updates: Updates | undefined
   lastError: string | undefined
 }
 
@@ -721,19 +795,20 @@ function proposalLine(proposal: Proposal | null, gauge: Gauge | null): string {
 
 /** What /compact-warning prints. */
 export function reportText(report: Report): string {
-  const { gauge, limit, told, proposal, settings, engineVersion, lastError } = report
+  const { gauge, limit, told, proposal, settings, engineVersion, updates, lastError } = report
 
   return [
-    healthText(lastError),
+    healthText(lastError, updates?.marketplace),
     contextLine(report),
     `Nudges: ${nudgesAt(thresholdsOf(limit, settings))}, ${TOLD_WORDS[told]}`,
     `Settings: ${settingsText(settings)}`,
     `To change one: /${COMMAND} stop 300k`,
     `Claude Code: ${engineVersion ?? 'unknown version'}`,
+    ...(updates === undefined ? [] : [updatesText(updates)]),
     proposalLine(proposal, gauge),
   ].join('\n')
 }
 
 export const TOOL_DESCRIPTION = `Proposes a compaction of this conversation at a good breakpoint. Call it only in the main conversation, after you have written the session's state where the project keeps it (a status document, a commit), if it has such a place. ${BREAKPOINT} After the call, end your turn: the user gets a ready /compact line with your instructions, and an automatic compaction uses them too.`
 
-export const INSTRUCTIONS_DESCRIPTION = `What the summary must keep, most important first, then what to drop. A shape that works: (1) your role and the agreed plan, with what not to start; (2) where the truth is: the document and section to read first after the compaction, or the state itself when no document holds it; (3) the live state: what is running, by id, and what to do when each finishes; (4) the exact commands of any repeated step; (5) the nevers; (6) what is still owed; (7) the user's decisions that shape everything; (8) drop: content already written into documents, tool output, back-and-forth. At most ${MAX_INSTRUCTIONS} characters.`
+export const INSTRUCTIONS_DESCRIPTION = `Aim for ${AIM_INSTRUCTIONS} characters or fewer: point at documents, do not repeat them. Say what the summary must keep, most important first, then what to drop. A shape that works: (1) your role and the agreed plan, with what not to start; (2) where the truth is: the document and section to read first after the compaction, or the state itself when no document holds it; (3) the live state: what is running, by id, and what to do when each finishes; (4) the exact commands of any repeated step; (5) the nevers; (6) what is still owed; (7) the user's decisions that shape everything; (8) drop: content already written into documents, tool output, back-and-forth.`

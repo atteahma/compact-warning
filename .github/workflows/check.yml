@@ -32,6 +32,38 @@ jobs:
       - name: Check the mod
         run: tools/check
 
+  # Two real sessions, which the tests' stand-ins cannot replace. The job needs a
+  # login: without the secret it says so and passes. docs/development.md says
+  # how to add the secret.
+  live:
+    name: Live check
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Look for the token
+        id: token
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The live check did not run: this repository has no CLAUDE_CODE_OAUTH_TOKEN secret."
+          fi
+      - name: Install Claude Code from the latest channel
+        if: steps.token.outputs.present == 'true'
+        run: npm install --global "@anthropic-ai/claude-code@latest"
+      - name: Run two real sessions with the mod
+        if: steps.token.outputs.present == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PLUGIN_DIRS: ${{ github.workspace }}
+        run: tools/live-check
+
   version:
     name: Version raised
     if: github.event_name == 'push' || github.event_name == 'pull_request'

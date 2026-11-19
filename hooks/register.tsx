@@ -25,6 +25,8 @@ import {
   STALE_NOTE,
   TOOL_DESCRIPTION,
   TOOL_NAME,
+  UPDATES_NOTICE,
+  UPDATES_TOLD_KEY,
   USAGE,
   ageOf,
   cleanInstructions,
@@ -34,7 +36,10 @@ import {
   gaugeOf,
   greetingText,
   hasShrunk,
+  installOf,
   instructionsFor,
+  isAutoUpdated,
+  isNoticeDue,
   isOlder,
   isStronger,
   levelOf,
@@ -56,7 +61,7 @@ import {
   thresholdsOf,
   toastText,
 } from './logic'
-import type { GreetingText, Settings, StoredSettings, Task } from './logic'
+import type { GreetingText, Settings, StoredSettings, Task, Updates } from './logic'
 
 type Engine = EngineInterface
 
@@ -450,6 +455,49 @@ async function checkFloor($: Engine): Promise<void> {
   isOff = isOlder(version, MIN_VERSION)
 }
 
+/**
+ * How updates reach this copy; undefined for a copy that Claude Code reads in
+ * place. The setting has two homes, and either read may fail: what cannot be
+ * read counts as not set.
+ */
+async function updatesNow($: Engine): Promise<Updates | undefined> {
+  const install = installOf($.plugin.root)
+
+  if (install === undefined) {
+    return undefined
+  }
+
+  let declared: unknown
+  let known: unknown
+
+  try {
+    declared = await $.settings.read({ key: 'extraKnownMarketplaces' })
+  } catch {
+    declared = undefined
+  }
+
+  try {
+    known = JSON.parse(await $.fs.read(`${install.configDir}/plugins/known_marketplaces.json`))
+  } catch {
+    known = undefined
+  }
+
+  const { marketplace } = install
+
+  return { marketplace, isAutomatic: isAutoUpdated(marketplace, declared, known) }
+}
+
+/**
+ * Tells a person once that their copy gets no fixes by itself. A fix for a
+ * break that a new Claude Code causes would otherwise never reach them.
+ */
+async function tellAboutUpdates($: Engine): Promise<void> {
+  if (isNoticeDue(await updatesNow($), await $.store.get(UPDATES_TOLD_KEY))) {
+    await $.store.set(UPDATES_TOLD_KEY, true)
+    $.ui.toast(UPDATES_NOTICE, { timeoutMs: LONG_TOAST_MS })
+  }
+}
+
 /** The report, after the same readings as at the start. */
 async function report($: Engine): Promise<string> {
   const { reading, limit, isAutoCompact } = await inspect($)
@@ -463,6 +511,7 @@ async function report($: Engine): Promise<string> {
     proposal: await read($, proposal),
     settings: await settingsNow($),
     engineVersion,
+    updates: await updatesNow($),
     lastError,
   })
 }
@@ -513,6 +562,7 @@ export const register: Register = on => {
       if (e.isInteractive && lastError === undefined) {
         const thresholds = thresholdsOf(limit, await settingsNow($))
         await greet($, greetingText(limit, isAutoCompact, thresholds))
+        await tellAboutUpdates($)
       }
     })
 

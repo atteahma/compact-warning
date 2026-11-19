@@ -4,6 +4,21 @@ Each release names the Claude Code versions it was checked on. The mod API is ea
 so a release can stop working on a later Claude Code. The daily check in this repository
 shows when that happens.
 
+## 0.2.1
+
+Checked on Claude Code 2.1.328.
+
+- **The report says how updates arrive.** `/compact-warning` shows `Updates: automatic`, or
+  `Updates: by hand` with the way to turn auto-update on. A fix for a break that a new
+  Claude Code causes reaches nobody who updates by hand.
+- **One notice about updates.** A copy that is updated by hand says so once, when a
+  session starts.
+- **The fix command names your marketplace.** When a hook fails, the report shows the
+  update command for the marketplace your copy came from.
+- **Proposals pass on the first try.** Claude is told to aim for 3,000 characters, and the
+  tool takes up to 4,500. Before, it refused every proposal over 4,000, which was half of
+  them: Claude writes up to the number it is given, and a little over.
+
 ## 0.2.0
 
 The first public release. Checked on Claude Code 2.1.328.

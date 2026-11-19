@@ -2,7 +2,9 @@ import { expect, test } from 'claude-code/testing'
 import type { AgentInfo, AgentStatus } from 'claude-code'
 
 import {
+  AIM_INSTRUCTIONS,
   DEFAULT_SETTINGS,
+  INSTRUCTIONS_DESCRIPTION,
   MAX_INSTRUCTIONS,
   MAX_NAMED,
   MIN_VERSION,
@@ -16,7 +18,10 @@ import {
   greetingText,
   hasShrunk,
   healthText,
+  installOf,
   instructionsFor,
+  isAutoUpdated,
+  isNoticeDue,
   isOlder,
   isStronger,
   isUnfinished,
@@ -42,6 +47,8 @@ import {
   toastText,
   tokensText,
   unfinishedOf,
+  updateCommand,
+  updatesText,
 } from '../hooks/logic'
 import type { Report, Settings, Task } from '../hooks/logic'
 
@@ -262,9 +269,34 @@ test('instructions are trimmed, and refused when empty or too long', () => {
   )
   expect(cleanInstructions(42)).toBe('')
   expect(refusalOf('')).toContain('Give `instructions`')
-  expect(refusalOf('x'.repeat(MAX_INSTRUCTIONS + 1))).toContain('Shorten')
   expect(refusalOf('keep the plan')).toBeUndefined()
   expect(compactLine('keep the plan')).toBe('/compact keep the plan')
+})
+
+test('instructions over the aim pass, and only a runaway draft is refused', () => {
+  expect(AIM_INSTRUCTIONS).toBe(3000)
+  expect(MAX_INSTRUCTIONS).toBe(4500)
+  // The model is told the aim, never the limit: it writes up to the number it is given.
+  expect(INSTRUCTIONS_DESCRIPTION).toContain('Aim for 3000 characters or fewer')
+  expect(INSTRUCTIONS_DESCRIPTION).not.toContain('4500')
+  // The longest first draft in 49 real proposals was 4858 characters against an aim of 4000:
+  // a fifth over. The same overshoot of this aim is 3600.
+  expect(refusalOf('x'.repeat(3600))).toBeUndefined()
+  expect(refusalOf('x'.repeat(4500))).toBeUndefined()
+  expect(refusalOf('x'.repeat(4501))).toBe(
+    'The instructions are 4501 characters long, and the aim is 3000. Cut them by about 40%: point at the state document instead of repeating it.',
+  )
+  expect(refusalOf('x'.repeat(9000))).toContain('Cut them by about 70%')
+})
+
+test('the notice about updates is due once, for a copy updated by hand', () => {
+  const byHand = { marketplace: 'compact-warning', isAutomatic: false }
+
+  expect(isNoticeDue(byHand, undefined)).toBe(true)
+  expect(isNoticeDue(byHand, true)).toBe(false)
+  expect(isNoticeDue({ ...byHand, isAutomatic: true }, undefined)).toBe(false)
+  // A copy that Claude Code reads from a folder has no updates to speak of.
+  expect(isNoticeDue(undefined, undefined)).toBe(false)
 })
 
 test('the toast says what Claude is doing', () => {
@@ -336,6 +368,7 @@ const REPORT: Report = {
   proposal: null,
   settings: DEFAULT_SETTINGS,
   engineVersion: '2.1.325',
+  updates: undefined,
   lastError: undefined,
 }
 
@@ -344,6 +377,56 @@ test('the report opens with the verdict of the checks, and what to do', () => {
   expect(healthText('tool.call: boom')).toBe(
     'Health: needs attention, error in tool.call: boom\nFor a fix, run: claude plugin update compact-warning@compact-warning',
   )
+})
+
+test('a copy from a marketplace knows where it came from, and a folder does not', () => {
+  expect(installOf('/Users/sam/.claude/plugins/cache/compact-warning/compact-warning/0.2.1')).toEqual({
+    configDir: '/Users/sam/.claude',
+    marketplace: 'compact-warning',
+  })
+  // Another name for the marketplace, a version that is a commit, and Windows.
+  expect(installOf('/home/sam/cfg/plugins/cache/sams-mods/compact-warning/3a448eea1907/')).toEqual({
+    configDir: '/home/sam/cfg',
+    marketplace: 'sams-mods',
+  })
+  expect(
+    installOf('C:\\Users\\sam\\.claude\\plugins\\cache\\compact-warning\\compact-warning\\0.2.1'),
+  ).toEqual({ configDir: 'C:\\Users\\sam\\.claude', marketplace: 'compact-warning' })
+  // Read in place: a clone, or a folder named at the start.
+  expect(installOf('/Users/sam/repos/compact-warning')).toBeUndefined()
+  expect(installOf('/Users/sam/.claude/plugins/cache')).toBeUndefined()
+})
+
+test('updates are automatic only where a setting says so, and the settings win', () => {
+  const on = { 'compact-warning': { source: { source: 'github' }, autoUpdate: true } }
+  const off = { 'compact-warning': { source: { source: 'github' }, autoUpdate: false } }
+  const unset = { 'compact-warning': { source: { source: 'github' } } }
+
+  expect(isAutoUpdated('compact-warning', on, undefined)).toBe(true)
+  expect(isAutoUpdated('compact-warning', unset, on)).toBe(true)
+  expect(isAutoUpdated('compact-warning', off, on)).toBe(false)
+  expect(isAutoUpdated('compact-warning', unset, unset)).toBe(false)
+  expect(isAutoUpdated('compact-warning', undefined, 'broken')).toBe(false)
+  // Another marketplace's switch says nothing about this one.
+  expect(isAutoUpdated('sams-mods', on, on)).toBe(false)
+})
+
+test('the report says how updates arrive, and names the marketplace in the fix', () => {
+  const byHand = { marketplace: 'sams-mods', isAutomatic: false }
+
+  expect(updatesText({ marketplace: 'compact-warning', isAutomatic: true })).toBe('Updates: automatic')
+  expect(updatesText(byHand)).toBe(
+    'Updates: by hand. For fixes by themselves: /plugin, Marketplaces, sams-mods, Turn on auto-update',
+  )
+  expect(updateCommand()).toBe('claude plugin update compact-warning@compact-warning')
+  expect(healthText('tool.call: boom', 'sams-mods')).toContain(
+    'For a fix, run: claude plugin update compact-warning@sams-mods',
+  )
+
+  const lines = reportText({ ...REPORT, updates: byHand }).split('\n')
+  expect(lines[5]).toBe('Claude Code: 2.1.325')
+  expect(lines[6]).toBe(updatesText(byHand))
+  expect(lines[7]).toBe('Proposal: none')
 })
 
 test('the report is one fact to a line', () => {

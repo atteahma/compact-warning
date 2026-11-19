@@ -33,7 +33,8 @@ line in the chat for the user to paste, and say that the mod is missing.
 
 ## The instructions
 
-Say what to keep, most important first, then what to drop. Stay under 4000 characters.
+Say what to keep, most important first, then what to drop. Aim for 3000 characters: point at
+documents, do not repeat them.
 
 1. Your role and the agreed plan, with what not to start.
 2. Where the truth is: the document and section to read first after the compaction.

@@ -14,6 +14,10 @@
 #
 # The sessions use the installed mod. To check another copy, name its folder
 # in CLAUDE_CODE_PLUGIN_DIRS.
+#
+# The sessions get the tools they need by name, so that the check does not
+# lean on the permission settings of the person who runs it. CI runs it too,
+# when the repository has a token: see docs/development.md.
 # Usage: tools/live-check
 
 set -euo pipefail
@@ -32,7 +36,8 @@ run_session() {
   local dir="$1" prompt="$2"
   shift 2
 
-  claude -p "$prompt" --model haiku --no-session-persistence "$@" \
+  claude -p "$prompt" --model haiku --no-session-persistence \
+    --allowedTools 'Bash(sleep:*)' Read ToolSearch "$@" \
     > "$dir/output.txt" 2> "$dir/errors.txt" || {
     echo "== failed: the session ended with an error"
     cat "$dir/errors.txt"

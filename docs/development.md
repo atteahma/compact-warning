@@ -24,7 +24,7 @@ then writes its API types to `.claude-plugin/types/`.
 | Script | What it does | Cost |
 |---|---|---|
 | `tools/check` | Runs `claude plugin validate --strict`, which also checks the types, and the tests. It needs no login. | A few seconds, free |
-| `tools/live-check` | Runs two headless Haiku sessions. The first starts a background command and proposes twice: the tool must name the command while it runs, and not after it ended. The second proposes a compaction, then reads a large file until Claude Code compacts by itself: that compaction must receive the proposal. | About two minutes, a few cents |
+| `tools/live-check` | Runs two headless Haiku sessions. The first starts a background command and proposes twice: the tool must name the command while it runs, and not after it ended. The second proposes a compaction, then reads a large file until Claude Code compacts by itself: that compaction must receive the proposal. It needs a login. | About two minutes, a few cents |
 | `tools/version-guard <commit>` | Fails when the mod's code changed since that commit and its version did not. | Free |
 
 - **`tools/check` after every change.** The tests run against stand-ins, so they are fast.
@@ -59,6 +59,19 @@ a day without a push means that a new Claude Code broke the mod: fix it, and rel
 
 The workflow also runs `tools/version-guard` on a push and on a pull request.
 
+**The tests alone can stay green while a real session fails.** They run against stand-ins.
+So the workflow has a third job, the live check. It runs `tools/live-check` once a day and
+when you start the workflow by hand. It needs a login, which a repository secret gives:
+
+```sh
+claude setup-token
+gh secret set CLAUDE_CODE_OAUTH_TOKEN
+```
+
+The first command makes a long-lived token for a Claude subscription. The second asks for
+it and stores it as the secret. Without the secret the job says that it did not run, and
+passes. Each run costs what two short Haiku sessions cost, against that subscription.
+
 **The schedule can stop.** In a public repository, GitHub turns scheduled workflows off
 after 60 days without activity in the repository. Its docs give the reason: "to prevent
 unnecessary workflow runs". To turn the schedule on again, open the Actions tab, or run
@@ -83,6 +96,32 @@ On a Claude Code older than the floor, `tools/check` checks the manifest only.
 
 At a session start the mod runs a start check: it registers its tool and command, and reads
 the context's size and limit. The green line shows only when all of that worked.
+
+## How a fix reaches someone who installed
+
+It does not, by itself. For a marketplace like this one, Claude Code's auto-update is off
+until each person turns it on, the install command has no flag for it, and
+`marketplace.json` has no field for it. So:
+
+- **The README's Install section has the step,** with the label Claude Code shows.
+- **One notice at a session start,** once per person, when their copy is updated by hand.
+- **The report says how updates arrive.** An installed copy sits under
+  `<config>/plugins/cache/<marketplace>/`, which gives the mod its marketplace's name. The
+  switch has two homes: `extraKnownMarketplaces` in the settings, and Claude Code's own
+  `plugins/known_marketplaces.json`. The settings win. A copy that Claude Code reads from a
+  folder gets no such line.
+
+## The length of a proposal
+
+The tool's description tells the model to aim for 3,000 characters. The tool takes up to
+4,500, and the model is never told that number.
+
+- **The model writes up to the number it is given.** In 49 real proposals against a stated
+  4,000, the drafts ran from 3,700 to 4,858 characters: up to a fifth over.
+- **A refusal at the stated number fails half the time.** 24 of those 49 were refused, each
+  a full draft written twice while the context was nearly full.
+- **Only a runaway draft is refused,** with a share to cut, which is easier to hit than a
+  count of characters.
 
 ## The settings
 
@@ -139,6 +178,22 @@ Every hook passes its event on unchanged when the mod's own work fails.
 The limit is the auto-compaction point. While auto-compaction is off, it is the whole
 context window.
 
+## Limits by design
+
+- **A session that never reaches a breakpoint.** The mod cannot pick one. The context then
+  fills, and auto-compaction runs with the last proposal, or with none.
+- **Subagents.** The mod leaves a subagent's own context alone. Subagents compact by
+  themselves.
+- **Work that is still running.** The mod never waits for a subagent or a background task.
+  Its report can arrive after the compaction, so the instructions must cover it.
+- **Slower compaction.** Claude Code can compute a summary ahead of time. Such a summary
+  cannot follow later instructions, so the mod refuses it. A compaction then writes its
+  summary when it runs.
+- **A reading one step behind.** The context's size is the input size of the last response.
+- **Settings per machine.** They live in the mod's own store, not in `settings.json`. Claude
+  Code drops a store that no session used for its cleanup period, and the settings then
+  return to their defaults.
+
 ## What the mod cannot see
 
 - **Its own failure to load.** When Claude Code refuses the module, for example after an
@@ -146,7 +201,8 @@ context window.
   only sign in the session. `claude plugin validate` reports it, so the daily check does.
 - **Background tasks.** Claude Code gives a mod a list of the session's agents, but none of
   its background commands, workflows and monitors. The mod keeps its own list from the tool
-  results that start them and the notifications that end them.
+  results that start them and the notifications that end them. The list starts empty when
+  the mod loads, so it misses a task that was started before.
 - **The text of a notification.** Claude Code does not document it. If an update changes
   it, a finished task stays listed as still running. `tools/check` cannot see that, and
   `tools/live-check` can.

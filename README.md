@@ -18,7 +18,7 @@ Then turn on updates, once: in a session, run `/plugin`, go to **Marketplaces**,
 
 Claude Code ships almost daily, and an update can break a mod. With auto-update on, a fix
 reaches you by itself. Without it, you get a fix only when you run the update command at
-the end of this page.
+the end of this page. `/compact-warning` shows which of the two holds.
 
 - **It needs** Claude Code 2.1.325 or later. On an older one the mod turns itself off and
   says so.
@@ -89,6 +89,7 @@ Nudges: at 774k and 851k tokens, none sent yet
 Settings: warn 80%, stop 88%, reserve 30k, unattended off
 To change one: /compact-warning stop 300k
 Claude Code: 2.1.328
+Updates: automatic
 Proposal: none
 ```
 
@@ -134,24 +135,6 @@ A hook that fails is skipped: the session carries on with plain auto-compaction.
 | `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod, as shown below. If the error stays, open an issue with the message. |
 
 An organization that manages Claude Code can block mods that its users install.
-
-## Limits
-
-- **A session that never reaches a breakpoint.** The mod cannot pick one. The context then
-  fills, and auto-compaction runs with the last proposal, or with none.
-- **Subagents.** The mod leaves a subagent's own context alone. Subagents compact by
-  themselves.
-- **Work that is still running.** The mod never waits for a subagent or a background task.
-  Its report can arrive after the compaction, so the instructions must cover it.
-- **Background tasks started before the mod loaded.** The mod keeps its own list of
-  background commands, workflows and monitors, and that list starts empty.
-- **Slower compaction.** Claude Code can compute a summary ahead of time. Such a summary
-  cannot follow later instructions, so the mod refuses it. A compaction then writes its
-  summary when it runs.
-- **A reading one step behind.** The context's size is the input size of the last response.
-- **Settings per machine.** They live in the mod's own store, not in `settings.json`. Claude
-  Code drops a store that no session used for its cleanup period, and the settings then
-  return to their defaults.
 
 ## Update or remove
 
