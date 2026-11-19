@@ -31,6 +31,9 @@ then writes its API types to `.claude-plugin/types/`.
 - **`tools/live-check` before a release.** Only a real session shows a change in Claude
   Code's own behavior. It uses the installed mod. To check another copy, name its folder in
   `CLAUDE_CODE_PLUGIN_DIRS`.
+- **To look at the mod in a real session,** use the driver in
+  `.claude/skills/run-compact-warning/`. Its `SKILL.md` has the commands, and Claude Code
+  offers it as the skill `/run-compact-warning` in this repository.
 
 ## Releases
 
@@ -56,8 +59,15 @@ a day without a push means that a new Claude Code broke the mod: fix it, and rel
 
 The workflow also runs `tools/version-guard` on a push and on a pull request.
 
-GitHub stops a scheduled workflow after 60 days without activity in the repository, and
-shows a button to turn it back on.
+**The schedule can stop.** In a public repository, GitHub turns scheduled workflows off
+after 60 days without activity in the repository. Its docs give the reason: "to prevent
+unnecessary workflow runs". To turn the schedule on again, open the Actions tab, or run
+`gh workflow enable check.yml`.
+
+- **The workflow has no step that keeps itself alive, on purpose.** GitHub has taken down
+  the best-known action that did that, for a violation of its terms.
+- **While the schedule is off, the badge in the README shows the last run,** however old
+  it is. `tools/release` still runs the same checks before every release.
 
 ## Which Claude Code the mod runs on
 
@@ -97,6 +107,7 @@ the key `settings`.
 | `tests/register.test.ts` | The tests of the hooks, run against Claude Code's test kit. |
 | `docs/compact-breakpoint.md` | An optional rule for the model. The mod works without it. |
 | `tools/` | The checks and the release script. |
+| `.claude/skills/run-compact-warning/` | A driver that runs the mod in a real Claude Code session, and its instructions. |
 | `.github/workflows/check.yml` | The daily check. |
 
 ## The hooks

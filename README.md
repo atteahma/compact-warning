@@ -18,7 +18,8 @@ claude plugin install compact-warning --marketplace atteahma/compact-warning
 - **It needs no setup,** and the install asks for nothing.
 - **New sessions load it.** In a session that is already open, run `/reload-plugins`.
 
-The mod is checked every day against the newest Claude Code:
+A scheduled check runs the mod's tests against the newest Claude Code. The badge shows its
+latest run:
 [![check](https://github.com/atteahma/compact-warning/actions/workflows/check.yml/badge.svg)](https://github.com/atteahma/compact-warning/actions/workflows/check.yml)
 
 ## How it works
