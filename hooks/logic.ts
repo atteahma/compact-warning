@@ -40,10 +40,24 @@ const MAX_PERCENT = 99
 /** The largest share of the limit that the reserve may take. */
 const MAX_RESERVE_SHARE = 0.25
 /**
+ * How long before a subagent's auto-compaction the mod asks it for its
+ * instructions, in tokens. Later means fresher instructions. Too late means
+ * none: the subagent needs two or three steps to answer, and in 52,000 steps of
+ * real subagents the context grew by more than this in about 1 of 1,000 such
+ * stretches (by more than 30,000 in about 1 of 100).
+ */
+export const SUBAGENT_ROOM = 50_000
+
+/**
+ * How often a subagent is asked: the request, and one reminder after its next
+ * tool call, in case the request came at a bad moment.
+ */
+export const MAX_SUBAGENT_ASKS = 2
+/**
  * The oldest Claude Code the mod runs on. The manifest's `engines` states the
  * same floor, but a Claude Code older than 2.1.323 does not read it.
  */
-export const MIN_VERSION = '2.1.325'
+export const MIN_VERSION = '2.1.326'
 
 const VERSION_PARTS = /^(\d+)\.(\d+)\.(\d+)/
 
@@ -75,6 +89,8 @@ export type Settings = {
   /** The room, in tokens, kept before the limit for the hand-over; 0 for none. */
   reserveTokens: number
   isUnattended: boolean
+  /** True when subagents are asked for their own compaction instructions. */
+  isForSubagents: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -82,6 +98,7 @@ export const DEFAULT_SETTINGS: Settings = {
   stop: { unit: 'percent', value: DEFAULT_STOP },
   reserveTokens: DEFAULT_RESERVE,
   isUnattended: false,
+  isForSubagents: true,
 }
 
 /** The store's key for the settings. */
@@ -118,12 +135,14 @@ export function storedOf(value: unknown): StoredSettings {
   const stop = markOf(field(value, 'stop'))
   const reserveTokens = field(value, 'reserveTokens')
   const isUnattended = field(value, 'isUnattended')
+  const isForSubagents = field(value, 'isForSubagents')
 
   return {
     ...(warn === undefined ? {} : { warn }),
     ...(stop === undefined ? {} : { stop }),
     ...(isCount(reserveTokens) ? { reserveTokens } : {}),
     ...(typeof isUnattended === 'boolean' ? { isUnattended } : {}),
+    ...(typeof isForSubagents === 'boolean' ? { isForSubagents } : {}),
   }
 }
 
@@ -178,6 +197,7 @@ export const USAGE = [
   `/${COMMAND} stop 88%: the second nudge`,
   `/${COMMAND} reserve 30k: room kept for the hand-over on a small window`,
   `/${COMMAND} unattended on: compact without asking`,
+  `/${COMMAND} subagents off: leave subagents alone`,
   `/${COMMAND} reset: back to the defaults`,
 ].join('\n')
 
@@ -219,6 +239,12 @@ export function requestOf(args: string): Request {
       : { kind: 'refuse', why: 'Give unattended the value on or off.' }
   }
 
+  if (name === 'subagents') {
+    return value === 'on' || value === 'off'
+      ? { kind: 'set', change: { isForSubagents: value === 'on' }, said: `Set subagents to ${value}.` }
+      : { kind: 'refuse', why: 'Give subagents the value on or off.' }
+  }
+
   return { kind: 'refuse', why: `There is no setting "${name}".` }
 }
 
@@ -229,6 +255,7 @@ export function settingsText(settings: Settings): string {
     `stop ${markText(settings.stop)}`,
     `reserve ${tokensText(settings.reserveTokens)}`,
     `unattended ${settings.isUnattended ? 'on' : 'off'}`,
+    `subagents ${settings.isForSubagents ? 'on' : 'off'}`,
   ].join(', ')
 }
 
@@ -255,6 +282,38 @@ export function thresholdsOf(limit: number, settings: Settings): Thresholds {
   const stop = stopAsked - shift
 
   return { warn: Math.max(0, Math.min(warnAsked - shift, stop)), stop }
+}
+
+/** What the main conversation's compaction is measured by. */
+export type MainWindow = {
+  /** The context window of the main conversation's model, in tokens. */
+  window: number
+  /** The window that compaction counts against: the model's, or a smaller one that was set. */
+  compactWindow: number
+  /** The token count where auto-compaction fires. */
+  point: number
+}
+
+/**
+ * Where auto-compaction fires for a subagent. Claude Code does not say, so the
+ * mod works it out from the main conversation: the same room stays free at the
+ * end of the subagent's own window, and a compaction window that was set for
+ * the session holds for its subagents too. Seen on Claude Code 2.1.328.
+ */
+export function subagentLimitOf(main: MainWindow, agentWindow: number | undefined): number {
+  const room = Math.max(0, main.compactWindow - main.point)
+  const own = agentWindow !== undefined && agentWindow > 0 ? agentWindow : main.window
+  const window = main.compactWindow < main.window ? Math.min(own, main.compactWindow) : own
+
+  return Math.max(1, window - room)
+}
+
+/**
+ * Where a subagent is asked for its instructions: `SUBAGENT_ROOM` before its
+ * limit. On a small window the room is a quarter of the limit at most.
+ */
+export function subagentThresholdOf(limit: number): number {
+  return limit - Math.min(SUBAGENT_ROOM, Math.floor(limit * MAX_RESERVE_SHARE))
 }
 
 export function gaugeOf(tokens: number, limit: number, isAutoCompact = true): Gauge {
@@ -352,6 +411,38 @@ export function nudgeText(level: 'warn' | 'stop', gauge: Gauge, hasProposal: boo
   return `${head} ${ask} ${BREAKPOINT} ${HAND_OVER}${again}`
 }
 
+const SUBAGENT_SHAPE =
+  'Say what the summary must keep, most important first: your task as it was given, what is done, what you are doing right now, what is left, and the facts and paths that the rest needs. Then say what to drop.'
+
+const SUBAGENT_AFTER =
+  'The tool only stores the instructions, and its description says the same as this message. Load it with ToolSearch if its schema is not loaded. If you do not have the tool, ignore this message. After the call, keep working.'
+
+/**
+ * What the mod tells a subagent whose context is close to its auto-compaction.
+ * No mod can start that compaction or move it to a breakpoint, so the subagent
+ * is asked for its instructions late, and works on. `asked` counts the
+ * requests, this one included: the second is a reminder.
+ *
+ * It goes to the subagent as a message. With a tool result it is not trusted:
+ * a model rightly doubts instructions that arrive there, and of 12 Haiku
+ * subagents asked that way, 9 read on and never answered. Of 18 asked by
+ * message, all answered. So the text also
+ * says who sends it, asks for nothing that looks like hiding, and points at
+ * the tool's description, which the subagent can read for itself.
+ */
+export function subagentNudgeText(gauge: Gauge, asked = 1): string {
+  return asked <= 1
+    ? `[compact-warning] From compact-warning, a Claude Code mod that the user installed. This subagent's context is at ${gauge.percent}% of the point where Claude Code compacts it (${sizes(gauge)}), so a compaction comes soon and by itself. To let its summary keep what your task needs, call the tool ${TOOL} before your next step, with instructions for the summary. ${SUBAGENT_SHAPE} ${SUBAGENT_AFTER}`
+    : `[compact-warning] A reminder from the compact-warning mod: the tool ${TOOL} has not been called, and Claude Code compacts this subagent soon (${sizes(gauge)}). Call it before your next step, with instructions for the summary. ${SUBAGENT_SHAPE} ${SUBAGENT_AFTER}`
+}
+
+/** The tool's answer to a subagent: its proposal is stored, and it works on. */
+export const SUBAGENT_STORED =
+  'Stored. Keep working: when Claude Code compacts this conversation, the summary follows these instructions.'
+
+/** Why the tool refuses a subagent while the mod is set to leave subagents alone. */
+export const SUBAGENTS_OFF = 'Only the main conversation can propose a compaction. A subagent cannot.'
+
 /** What the model reads with a prompt while an offered proposal is unused. */
 export const STALE_NOTE = `[compact-warning] A compaction proposal from earlier in this session is stored and unused. A later compaction will use it. If this turn changes the state it describes, call ${TOOL} again with new instructions before you end the turn.`
 
@@ -384,7 +475,7 @@ export function refusalOf(instructions: string): string | undefined {
 }
 
 /** How many tokens the context has grown since the proposal; 0 when unknown. */
-export function ageOf(proposal: Proposal | null, gauge: Gauge | null): number {
+export function ageOf(proposal: Pick<Proposal, 'tokens'> | null, gauge: Gauge | null): number {
   if (proposal === null || proposal.tokens === null || gauge === null) {
     return 0
   }
@@ -396,7 +487,10 @@ export function ageOf(proposal: Proposal | null, gauge: Gauge | null): number {
  * The instructions as a compaction gets them. Once the conversation has moved
  * on since they were written, the summary is told so.
  */
-export function instructionsFor(proposal: Proposal, gauge: Gauge | null): string {
+export function instructionsFor(
+  proposal: Pick<Proposal, 'instructions' | 'tokens'>,
+  gauge: Gauge | null,
+): string {
   const age = ageOf(proposal, gauge)
 
   return age < STALE_TOKENS
@@ -809,6 +903,6 @@ export function reportText(report: Report): string {
   ].join('\n')
 }
 
-export const TOOL_DESCRIPTION = `Proposes a compaction of this conversation at a good breakpoint. Call it only in the main conversation, after you have written the session's state where the project keeps it (a status document, a commit), if it has such a place. ${BREAKPOINT} After the call, end your turn: the user gets a ready /compact line with your instructions, and an automatic compaction uses them too.`
+export const TOOL_DESCRIPTION = `Proposes a compaction of this conversation. In the main conversation, call it at a good breakpoint, after you have written the session's state where the project keeps it (a status document, a commit), if it has such a place. ${BREAKPOINT} After the call, end your turn: the user gets a ready /compact line with your instructions, and an automatic compaction uses them too. A subagent calls it when a message that begins with [compact-warning] asks for it: the mod sends that message when the subagent's context is close to its auto-compaction. The subagent then keeps working, and Claude Code's own compaction of the subagent uses the instructions.`
 
-export const INSTRUCTIONS_DESCRIPTION = `Aim for ${AIM_INSTRUCTIONS} characters or fewer: point at documents, do not repeat them. Say what the summary must keep, most important first, then what to drop. A shape that works: (1) your role and the agreed plan, with what not to start; (2) where the truth is: the document and section to read first after the compaction, or the state itself when no document holds it; (3) the live state: what is running, by id, and what to do when each finishes; (4) the exact commands of any repeated step; (5) the nevers; (6) what is still owed; (7) the user's decisions that shape everything; (8) drop: content already written into documents, tool output, back-and-forth.`
+export const INSTRUCTIONS_DESCRIPTION = `Aim for ${AIM_INSTRUCTIONS} characters or fewer: point at documents, do not repeat them. Say what the summary must keep, most important first, then what to drop. A shape that works: (1) your role and the agreed plan, with what not to start; (2) where the truth is: the document and section to read first after the compaction, or the state itself when no document holds it; (3) the live state: what is running, by id, and what to do when each finishes; (4) the exact commands of any repeated step; (5) the nevers; (6) what is still owed; (7) the user's decisions that shape everything; (8) drop: content already written into documents, tool output, back-and-forth. A subagent follows the shape that the mod's message gives.`

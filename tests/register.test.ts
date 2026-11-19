@@ -5,7 +5,7 @@ import type { AgentInfo, On, SessionMessage, SessionUsage } from 'claude-code'
 const TOOL = 'mcp__compact-warning__propose_compact'
 const WINDOW = 1_000_000
 const LIMIT = 967_000
-const VERSION = '2.1.325'
+const VERSION = '2.1.326'
 
 /** `percent` of the auto-compaction point, in tokens. */
 const at = (percent: number): number => Math.ceil((LIMIT * percent) / 100)
@@ -25,6 +25,10 @@ type World = {
   isUsageBroken: boolean
   agents: AgentInfo[]
   isAgentListBroken: boolean
+  /** True when a message to an agent cannot be delivered. */
+  isSendRefused: boolean
+  /** The messages the mod sent to agents. */
+  sends: Array<{ to: string; text: string }>
   /** What the next tool call answers. */
   toolResult: unknown
   statuses: string[]
@@ -44,6 +48,8 @@ function world(on: On, start: Partial<World> = {}): World {
     isUsageBroken: false,
     agents: [],
     isAgentListBroken: false,
+    isSendRefused: false,
+    sends: [],
     toolResult: {},
     statuses: [],
     toasts: [],
@@ -86,6 +92,15 @@ function world(on: On, start: Partial<World> = {}): World {
     }
 
     return { value: w.agents }
+  })
+  on('session.send', (_, e) => {
+    if (w.isSendRefused) {
+      return { isDelivered: false, reason: 'the recipient is gone' }
+    }
+
+    w.sends.push({ to: String(e.to), text: e.text })
+
+    return { isDelivered: true }
   })
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('command.register', () => ({ value: { command: 'compact-warning' } }))
@@ -148,6 +163,13 @@ const last = (list: readonly string[]): string => list[list.length - 1] ?? ''
 /** An agent as the mod reads one: the engine's own type grows between releases. */
 const agent = (given: Pick<AgentInfo, 'id' | 'description' | 'status'> & { parentId?: string }) =>
   ({ type: 'Explore', ...given }) as AgentInfo
+
+/** A subagent at work, as the mod reads one: its context's size and its model's window. */
+const worker = (id: string, tokenCount: number, contextWindowSize = WINDOW) =>
+  ({ type: 'general-purpose', id, description: 'dig', status: 'running', tokenCount, contextWindowSize }) as AgentInfo
+
+/** A tool call of the subagent `id`, as the mod hears it. */
+const workerCall = ($: Engine, id: string) => $.tool.call({ tool: 'Bash', command: 'ls', agentId: id })
 
 /** Calls the mod's own tool, which the typed tool names may not list. */
 const propose = ($: Engine, instructions: string) =>
@@ -248,7 +270,7 @@ test('on a Claude Code older than the floor the mod is off, and says so', async 
   expect(await greenLine($)).toBeUndefined()
   const { line, detail } = await offLine($)
   expect(line?.props['color']).toBe('warning')
-  expect(detail?.text).toBe(' · needs Claude Code 2.1.325 or later, this is 2.1.311')
+  expect(detail?.text).toBe(' · needs Claude Code 2.1.326 or later, this is 2.1.311')
 
   // No nudge, no status line, no toast: every hook passes its event on.
   const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
@@ -259,7 +281,7 @@ test('on a Claude Code older than the floor the mod is off, and says so', async 
   expect(w.toasts).toEqual([])
 
   const report = await $.command.run(STATUS_COMMAND)
-  expect(report.text).toContain('Health: off, needs Claude Code 2.1.325 or later, this is 2.1.311')
+  expect(report.text).toContain('Health: off, needs Claude Code 2.1.326 or later, this is 2.1.311')
 })
 
 test('a broken context reading fails the start check', async ($, on) => {
@@ -286,7 +308,7 @@ test('/compact-warning prints the report, and after a failure what to do', async
 
   const before = await $.command.run(STATUS_COMMAND)
   expect(before.text).toContain('Health: working\nContext: 116k of 967k tokens, 12% of auto-compact')
-  expect(before.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off\n')
+  expect(before.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on\n')
   expect(before.text).toContain(`Claude Code: ${VERSION}`)
 
   w.isUsageBroken = true
@@ -305,9 +327,9 @@ test('/compact-warning changes a setting for every session, and puts the default
   const set = await $.command.run({ ...STATUS_COMMAND, args: 'stop 300k' })
   expect(set.text).toContain('Set stop to 300k.\n\nHealth: working')
   expect(set.text).toContain('Nudges: at 300k tokens, none sent yet')
-  expect(set.text).toContain('Settings: warn 80%, stop 300k, reserve 30k, unattended off\n')
+  expect(set.text).toContain('Settings: warn 80%, stop 300k, reserve 30k, unattended off, subagents on\n')
   const both = await $.command.run({ ...STATUS_COMMAND, args: 'warn 250k' })
-  expect(both.text).toContain('Settings: warn 250k, stop 300k, reserve 30k, unattended off\n')
+  expect(both.text).toContain('Settings: warn 250k, stop 300k, reserve 30k, unattended off, subagents on\n')
   expect(both.text).toContain('Nudges: at 250k and 300k tokens, none sent yet')
 
   // The change holds at once, without a reload.
@@ -324,7 +346,7 @@ test('/compact-warning changes a setting for every session, and puts the default
   const reset = await $.command.run({ ...STATUS_COMMAND, args: 'reset' })
   expect(reset.text).toContain('Put the settings back to their defaults.')
   expect(reset.text).toContain('Nudges: at 774k and 851k tokens')
-  expect(reset.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off\n')
+  expect(reset.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on\n')
 })
 
 test('each threshold is told once, with the tool result', async ($, on) => {
@@ -348,12 +370,151 @@ test('each threshold is told once, with the tool result', async ($, on) => {
   expect(fourth.context ?? []).toEqual([])
 })
 
-test('a subagent is never nudged', async ($, on) => {
-  world(on, { tokens: at(95) })
+test('a subagent gets a message that asks for its instructions, 50 000 tokens before its compaction', async ($, on) => {
+  // The main conversation is far over its own nudges: they are not a subagent's.
+  const w = world(on, { tokens: at(95), agents: [worker('a1', 916_999)] })
   await $.session.start(START)
-  const ran = await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' })
+  await workerCall($, 'a1')
+  expect(w.sends).toEqual([])
+
+  w.agents = [worker('a1', 917_000), worker('a2', 100_000)]
+  // The request is a message, and the tool's result stays as it was.
+  expect((await workerCall($, 'a1')).context ?? []).toEqual([])
+  expect(w.sends.length).toBe(1)
+  expect(w.sends[0]?.to).toContain('a1')
+  expect(w.sends[0]?.text).toContain("This subagent's context is at 94% of the point")
+  expect(w.sends[0]?.text).toContain('keep working')
+  await workerCall($, 'a2')
+  expect(w.sends.length).toBe(1)
+
+  // It reads on: after its next tool call it gets one reminder, and no more follow.
+  await workerCall($, 'a1')
+  expect(w.sends[1]?.text).toContain('[compact-warning] A reminder from')
+  await workerCall($, 'a1')
+  expect(w.sends.length).toBe(2)
+  // Nothing of this reaches the person, and the main conversation is not told.
+  expect(w.toasts).toEqual([])
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'Stop at the next breakpoint',
+  )
+})
+
+test('a subagent on a small window is asked earlier, and one that is not listed never', async ($, on) => {
+  const w = world(on, { tokens: at(10), agents: [worker('a1', 125_249, 200_000)] })
+  await $.session.start(START)
+  await workerCall($, 'a1')
+  await workerCall($, 'gone')
+  expect(w.sends).toEqual([])
+
+  w.agents = [worker('a1', 125_250, 200_000)]
+  await workerCall($, 'a1')
+  expect(w.sends[0]?.text).toContain('(125k of 167k tokens)')
+})
+
+test('a request that cannot be sent as a message travels with the tool result', async ($, on) => {
+  const w = world(on, { tokens: at(10), agents: [worker('a1', 920_000)], isSendRefused: true })
+  await $.session.start(START)
+  const ran = await workerCall($, 'a1')
+
+  expect(w.sends).toEqual([])
+  expect(ran.context?.length).toBe(1)
+  expect(ran.context?.[0]).toContain('[compact-warning] From compact-warning, a Claude Code mod')
+})
+
+test("a subagent's compaction uses the instructions it proposed", async ($, on) => {
+  const w = world(on, { tokens: at(10), agents: [worker('a1', 920_000)] })
+  await $.session.start(START)
+  await workerCall($, 'a1')
+  const stored = await $.tool.call({ tool: TOOL, instructions: 'Keep the task.', agentId: 'a1' } as never)
+  expect(stored.result).toBe(
+    'Stored. Keep working: when Claude Code compacts this conversation, the summary follows these instructions.',
+  )
+  // It has answered, and is not asked again.
+  await workerCall($, 'a1')
+  expect(w.sends.length).toBe(1)
+  // It is not the main conversation's proposal: no /compact line is offered.
+  await $.turn.complete(TURN_END)
+  expect(w.fills).toEqual([])
+
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a2' })
+  w.agents = [worker('a1', 966_000)]
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1' })
+  expect(w.compactions.map(each => each.instructions)).toEqual([
+    undefined,
+    undefined,
+    'Keep the task.\n\n(These instructions were written about 46k tokens of conversation ago. Where the later conversation differs from them, the later conversation wins.)',
+  ])
+
+  // The compaction cleared them, and the subagent is asked again when it refills.
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1' })
+  expect(w.compactions[3]?.instructions).toBe(undefined)
+  w.agents = [worker('a1', 930_000)]
+  await workerCall($, 'a1')
+  expect(w.sends[1]?.text).toContain('[compact-warning] From compact-warning')
+})
+
+test('a subagent that proposes without being asked is taken at its word, and forgotten when its run ends', async ($, on) => {
+  const w = world(on, { tokens: at(10), agents: [worker('a1', 300_000)] })
+  await $.session.start(START)
+  await $.tool.call({ tool: TOOL, instructions: 'Keep the task.', agentId: 'a1' } as never)
+  const refused = await $.tool.call({ tool: TOOL, instructions: '  ', agentId: 'a1' } as never)
+  expect(refused.deny).toContain('Give `instructions`')
+
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1', instructions: 'theirs' })
+  expect(w.compactions[0]?.instructions).toBe('theirs')
+
+  await $.tool.call({ tool: TOOL, instructions: 'Keep the task.', agentId: 'a1' } as never)
+  await $.turn.complete({ ...TURN_END, agentId: 'a1' })
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1' })
+  expect(w.compactions[1]?.instructions).toBe(undefined)
+})
+
+test('with the setting off, and with auto-compaction off, a subagent is left alone', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, {
+    tokens: at(10),
+    agents: [worker('a1', 950_000)],
+    settings: { isForSubagents: false },
+  })
+  await $.session.start(START)
+  expect((await workerCall($, 'a1')).context ?? []).toEqual([])
+  expect(w.sends).toEqual([])
+  const refused = await $.tool.call({ tool: TOOL, instructions: 'Keep the task.', agentId: 'a1' } as never)
+  expect(refused.deny).toBe('Only the main conversation can propose a compaction. A subagent cannot.')
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES, agentId: 'a1' })
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1' })
+  expect(w.compactions).toEqual([
+    { trigger: 'precompute', instructions: undefined },
+    { trigger: 'auto', instructions: undefined },
+  ])
+
+  // On again, but no compaction will come that instructions could steer.
+  await $.command.run({ ...STATUS_COMMAND, args: 'subagents on' })
+  w.limit = undefined
+  await $.command.run(STATUS_COMMAND)
+  expect((await workerCall($, 'a1')).context ?? []).toEqual([])
+  expect(w.sends).toEqual([])
+})
+
+test("a subagent's instructions reach its compaction when its context cannot be read", async ($, on) => {
+  const w = world(on, { tokens: at(10), agents: [worker('a1', 920_000)] })
+  await $.session.start(START)
+  await $.tool.call({ tool: TOOL, instructions: 'Keep the task.', agentId: 'a1' } as never)
+  w.isAgentListBroken = true
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1' })
+
+  expect(w.compactions).toEqual([{ trigger: 'auto', instructions: 'Keep the task.' }])
+})
+
+test("an agent list that fails leaves a subagent's tool call as it was", async ($, on) => {
+  const w = world(on, { tokens: at(10), agents: [worker('a1', 950_000)], isAgentListBroken: true })
+  await $.session.start(START)
+  const ran = await workerCall($, 'a1')
 
   expect(ran.context ?? []).toEqual([])
+  expect(w.sends).toEqual([])
+  expect(last(w.statuses)).toContain('error in tool.call:')
 })
 
 test('a prompt carries the nudge too, and a slash command none', async ($, on) => {
@@ -517,7 +678,7 @@ test('an automatic compaction uses the stored instructions', async ($, on) => {
   expect(ran.context?.[0]).toContain('look for a good breakpoint')
 })
 
-test('instructions the person typed win, and a subagent is left alone', async ($, on) => {
+test("instructions the person typed win, and a subagent gets none of the main conversation's", async ($, on) => {
   const w = world(on, { tokens: at(90) })
   await $.session.start(START)
   await propose($, 'Keep the plan.')
@@ -556,7 +717,7 @@ test('a proposal the conversation has moved on from is used with a caveat', asyn
   expect(w.compactions[0]?.instructions).toContain('Keep the plan.\n\n(These instructions were written about 20k tokens')
 })
 
-test('no summary is computed ahead of time for the main conversation', async ($, on) => {
+test('no summary is computed ahead of time', async ($, on) => {
   const w = world(on, { tokens: at(85) })
   await $.session.start(START)
   await propose($, 'Keep the plan.')
@@ -565,13 +726,14 @@ test('no summary is computed ahead of time for the main conversation', async ($,
   expect(ahead.skip).toContain('the summary is written when the compaction runs')
   expect(w.compactions).toEqual([])
 
-  // A subagent's own transcript is left alone.
-  await $.session.compact({ trigger: 'precompute', messages: MESSAGES, agentId: 'a1' })
-  expect(w.compactions).toEqual([{ trigger: 'precompute', instructions: undefined }])
+  // Nor for a subagent: its instructions come late.
+  const early = await $.session.compact({ trigger: 'precompute', messages: MESSAGES, agentId: 'a1' })
+  expect(early.skip).toContain('the summary is written when the compaction runs')
+  expect(w.compactions).toEqual([])
 
   // The proposal is still there for the compaction that comes.
   await $.session.compact({ trigger: 'auto', messages: MESSAGES })
-  expect(w.compactions[1]).toEqual({ trigger: 'auto', instructions: 'Keep the plan.' })
+  expect(w.compactions[0]).toEqual({ trigger: 'auto', instructions: 'Keep the plan.' })
 })
 
 test('with no proposal a compaction runs unchanged', async ($, on) => {

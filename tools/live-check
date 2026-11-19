@@ -7,10 +7,13 @@
 #    not document, so an update can change it unseen.
 # 2. The backup. When nobody presses Enter, an automatic compaction must use
 #    the instructions the session proposed.
+# 3. Subagents. A subagent that comes close to its own compaction must be
+#    asked for its instructions, and that compaction must use them. Where a
+#    subagent is compacted is worked out, not read: Claude Code does not say.
 #
 # Each check starts a headless Claude Code session on Haiku in a temporary
-# folder. Together they take about two minutes and cost a few cents. The first
-# check needs jq.
+# folder. Together they take about four minutes and cost about eight cents. The
+# first and the third check need jq.
 #
 # The sessions use the installed mod. To check another copy, name its folder
 # in CLAUDE_CODE_PLUGIN_DIRS.
@@ -18,7 +21,8 @@
 # The sessions get the tools they need by name, so that the check does not
 # lean on the permission settings of the person who runs it. CI runs it too,
 # when the repository has a token: see docs/development.md.
-# Usage: tools/live-check
+# Usage: tools/live-check [tasks] [backup] [subagents]
+#   With no name, all three checks run.
 
 set -euo pipefail
 
@@ -37,7 +41,7 @@ run_session() {
   shift 2
 
   claude -p "$prompt" --model haiku --no-session-persistence \
-    --allowedTools 'Bash(sleep:*)' Read ToolSearch "$@" \
+    --allowedTools 'Bash(sleep:*)' Read ToolSearch Agent "$@" \
     > "$dir/output.txt" 2> "$dir/errors.txt" || {
     echo "== failed: the session ended with an error"
     cat "$dir/errors.txt"
@@ -100,6 +104,12 @@ check_tasks() {
   echo "== passed: the tool named the background command while it ran, and not after it ended"
 }
 
+# Settings with a PreCompact hook that appends what Claude Code received for
+# each compaction, the instructions among it, to the file $1.
+recorder() {
+  printf '{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"(cat; echo) >> %s"}]}]}}' "$1"
+}
+
 # An automatic compaction must use the proposed instructions. The session runs
 # with the auto-compaction window at its minimum (100 000 tokens). It proposes
 # a compaction, then reads a large file until Claude Code compacts by itself.
@@ -118,9 +128,7 @@ check_backup() {
 4. Read the file filler.txt in this folder 400 lines at a time (offset 1, then 401, then 801, and so on), one Read call per step, until you have made 5 Read calls in total. If the conversation is summarized on the way, keep counting from the summary.
 5. Reply with the word DONE and the number of the last row you read."
 
-  local settings="{\"hooks\":{\"PreCompact\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"(cat; echo) >> $record\"}]}]}}"
-
-  (cd "$dir" && CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 run_session "$dir" "$prompt" --settings "$settings") || return 1
+  (cd "$dir" && CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 run_session "$dir" "$prompt" --settings "$(recorder "$record")") || return 1
 
   if [ ! -s "$record" ]; then
     echo "== failed: no automatic compaction ran. The session answered:"
@@ -139,12 +147,91 @@ check_backup() {
   fi
 }
 
-echo "== live check on Claude Code $(claude --version | cut -d' ' -f1): two headless sessions, about two minutes"
+# The steps of a session's subagents, one to a line, from its stream output $1:
+# the size of the context in tokens, and the tools the step called.
+steps_of() {
+  if ! command -v jq > /dev/null; then
+    echo "   (jq is not on the PATH, so the steps cannot be listed)"
+    return 0
+  fi
+
+  jq -r '
+    select(.type == "assistant" and .parent_tool_use_id != null)
+    | [(.message.usage | (.input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens)),
+       ([.message.content[]? | select(.type == "tool_use") | .name] | join(" "))]
+    | select(.[1] != "") | "   \(.[0]) tokens: \(.[1])"
+  ' "$1"
+}
+
+# A subagent's compaction must use the instructions that the subagent proposed
+# when the mod asked. The session runs with the auto-compaction window at its
+# minimum and starts one subagent, which reads a file until Claude Code
+# compacts it. Its task says nothing of the mod: the mod's message must do
+# that, and the subagent must trust it. The reads are small, so that the
+# message comes with room left before the compaction.
+check_subagents() {
+  local dir="$work/subagents"
+  mkdir "$dir"
+  local record="$dir/precompact.jsonl"
+
+  seq -f "Row %04g: alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa." 1 6000 > "$dir/filler.txt"
+
+  local task="Read the file $dir/filler.txt with the Read tool: first lines 1 to 400 in one call, then 60 lines at a time (offset 401, then 461, and so on), one Read call per step, until you have made 14 Read calls in total. Do not stop early. If your conversation is summarized on the way, keep counting from the summary. At the end, reply with the word FINISHED and the number of the last row you read."
+  local prompt="This is a test. Follow the steps exactly. 1. Start one subagent with the Agent tool, with subagent_type general-purpose, the description 'reader', and exactly this prompt: \"$task\" 2. When the subagent has answered, reply with the word DONE. Do not send it messages, and start no second subagent."
+
+  (cd "$dir" && CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 run_session "$dir" "$prompt" \
+    --settings "$(recorder "$record")" --output-format stream-json --verbose) || return 1
+
+  if [ ! -s "$record" ]; then
+    echo "== failed: no compaction ran in the subagent. Its steps:"
+    steps_of "$dir/output.txt"
+    return 1
+  fi
+
+  # Only the subagent's own proposal can be there: its task gave it none.
+  if grep -q '"agent_id":"[^"]*".*"trigger":"auto","custom_instructions":"' "$record"; then
+    echo "== passed: a subagent was asked for its instructions, and its compaction used them"
+  else
+    echo "== failed: no compaction of the subagent got instructions from it. The subagent was"
+    echo "   not asked in time, or did not answer. A step named ToolSearch below means that"
+    echo "   it was asked: see subagentLimitOf and subagentNudgeText in hooks/logic.ts."
+    grep -o '"trigger":"[a-z]*","custom_instructions":.\{0,120\}' "$record"
+    echo "   Its steps:"
+    steps_of "$dir/output.txt"
+    return 1
+  fi
+}
+
+if [ "$#" -eq 0 ]; then
+  set -- tasks backup subagents
+fi
+
+echo "== live check on Claude Code $(claude --version | cut -d' ' -f1): $# headless sessions, about a minute each"
 
 failed=0
-echo "== 1 of 2: background tasks"
-check_tasks || failed=1
-echo "== 2 of 2: the backup"
-check_backup || failed=1
+count=0
+
+for name in "$@"; do
+  count=$((count + 1))
+
+  case "$name" in
+    tasks)
+      echo "== $count of $#: background tasks"
+      check_tasks || failed=1
+      ;;
+    backup)
+      echo "== $count of $#: the backup"
+      check_backup || failed=1
+      ;;
+    subagents)
+      echo "== $count of $#: subagents"
+      check_subagents || failed=1
+      ;;
+    *)
+      echo "Usage: tools/live-check [tasks] [backup] [subagents]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 exit "$failed"

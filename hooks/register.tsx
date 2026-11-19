@@ -2,6 +2,10 @@
 // takes the compaction it proposes at a breakpoint, and hands the person a
 // ready /compact line. An automatic compaction uses the same instructions.
 //
+// A subagent has nobody at a prompt, and no mod can start its compaction. So
+// the mod sends it a message shortly before Claude Code compacts it, to ask
+// for its instructions, and that compaction gets them.
+//
 // Every hook passes the event on unchanged when its own work fails: the
 // session then falls back to plain auto-compaction, and the failure shows in
 // the status line under the prompt.
@@ -17,12 +21,15 @@ import type { Gauge } from '../types'
 import {
   COMMAND,
   INSTRUCTIONS_DESCRIPTION,
+  MAX_SUBAGENT_ASKS,
   MAX_TASKS,
   MIN_VERSION,
   PRECOMPUTE_SKIP,
   RESUME_PROMPT,
   SETTINGS_KEY,
   STALE_NOTE,
+  SUBAGENTS_OFF,
+  SUBAGENT_STORED,
   TOOL_DESCRIPTION,
   TOOL_NAME,
   UPDATES_NOTICE,
@@ -57,6 +64,9 @@ import {
   stoppedOf,
   storedOf,
   storedText,
+  subagentLimitOf,
+  subagentNudgeText,
+  subagentThresholdOf,
   taskOf,
   thresholdsOf,
   toastText,
@@ -74,6 +84,7 @@ const proposal = atom({ plugin: 'compact-warning', key: 'proposal' } as const, n
 const gauge = atom({ plugin: 'compact-warning', key: 'gauge' } as const, null)
 const isRowHidden = atom({ plugin: 'compact-warning', key: 'isRowHidden' } as const, false)
 const greeting = atom({ plugin: 'compact-warning', key: 'greeting' } as const, null)
+const subagents = atom({ plugin: 'compact-warning', key: 'subagents' } as const, {})
 
 /** How long the auto-compaction point is trusted before it is read again. */
 const LIMIT_TTL_MS = 5 * 60 * 1000
@@ -97,11 +108,15 @@ type Limit = {
   /** Where auto-compaction fires, or the whole window while it is off. */
   limit: number
   isAutoCompact: boolean
+  /** The window that compaction counts against: the model's, or a smaller one that was set. */
+  compactWindow: number
 }
 
 let limitCache: (Limit & { window: number; at: number }) | undefined
 let settingsCache: { settings: Settings; at: number } | undefined
 let senseStartedAt: number | undefined
+/** The subagents whose fill is being read: of several calls at once, one reads. */
+const sensing = new Set<string>()
 let engineVersion: string | undefined
 /**
  * True on a Claude Code older than the mod's floor. The mod is then off: its
@@ -229,7 +244,14 @@ async function limitOf($: Engine, window: number): Promise<Limit> {
   const found = point ?? breakdown?.rawMaxTokens ?? window
   // The breakdown leaves the point out while auto-compaction is off.
   const isAutoCompact = breakdown === undefined || point !== undefined
-  limitCache = { window, limit: found > 0 ? found : window, isAutoCompact, at: now }
+  const compactWindow = breakdown?.rawMaxTokens ?? window
+  limitCache = {
+    window,
+    limit: found > 0 ? found : window,
+    isAutoCompact,
+    compactWindow: compactWindow > 0 ? compactWindow : window,
+    at: now,
+  }
 
   return limitCache
 }
@@ -283,13 +305,14 @@ async function refresh($: Engine): Promise<void> {
 async function inspect($: Engine): Promise<Limit & { reading: Gauge | null }> {
   limitCache = undefined
   const { context } = await $.session.usage()
-  const { limit, isAutoCompact } = await limitOf($, context.window)
+  const { limit, isAutoCompact, compactWindow } = await limitOf($, context.window)
 
   return {
     reading:
       context.tokens === undefined ? null : gaugeOf(context.tokens, limit, isAutoCompact),
     limit,
     isAutoCompact,
+    compactWindow,
   }
 }
 
@@ -359,6 +382,104 @@ async function sense($: Engine): Promise<string | undefined> {
     return note
   } finally {
     senseStartedAt = undefined
+  }
+}
+
+/**
+ * Reads a subagent's fill against the point where Claude Code compacts it.
+ * Undefined before its first response, and while auto-compaction is off: then
+ * no compaction comes that instructions could steer.
+ */
+async function measureSubagent($: Engine, id: string): Promise<Gauge | undefined> {
+  const { context } = await $.session.usage()
+  const main = await limitOf($, context.window)
+
+  if (!main.isAutoCompact) {
+    return undefined
+  }
+
+  const agent = (await $.agent.list()).find(each => each.id === id)
+
+  // No reading yet. A count that is missing is no reading either.
+  if (agent === undefined || !(agent.tokenCount > 0)) {
+    return undefined
+  }
+
+  const limit = subagentLimitOf(
+    { window: context.window, compactWindow: main.compactWindow, point: main.limit },
+    agent.contextWindowSize,
+  )
+
+  return gaugeOf(agent.tokenCount, limit)
+}
+
+/**
+ * Sends a subagent a message, as the SendMessage tool would. False when it
+ * could not be delivered.
+ */
+async function tell($: Engine, id: string, text: string): Promise<boolean> {
+  try {
+    return (await $.session.send({ to: { agentId: id }, text })).isDelivered
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Asks a subagent whose context has come close to its compaction for its
+ * instructions, when it has stored none yet. The request goes as a message.
+ * Only when that cannot be delivered is it answered here, to travel with the
+ * tool's result: there a subagent often takes it for an injected instruction.
+ * A subagent that reads on gets one reminder.
+ */
+async function senseSubagent($: Engine, id: string): Promise<string | undefined> {
+  if (sensing.has(id) || !(await settingsNow($)).isForSubagents) {
+    return undefined
+  }
+
+  sensing.add(id)
+
+  try {
+    const held = (await read($, subagents))[id]
+    const asked = (held?.asked ?? 0) + 1
+
+    // It has answered, or it was asked often enough.
+    if ((held !== undefined && held.proposal !== null) || asked > MAX_SUBAGENT_ASKS) {
+      return undefined
+    }
+
+    const reading = await measureSubagent($, id)
+
+    if (reading === undefined || reading.tokens < subagentThresholdOf(reading.limit)) {
+      return undefined
+    }
+
+    await update($, subagents, all => ({ ...all, [id]: { proposal: null, asked } }))
+    const request = subagentNudgeText(reading, asked)
+
+    return (await tell($, id, request)) ? undefined : request
+  } finally {
+    sensing.delete(id)
+  }
+}
+
+/** Stores the compaction a subagent proposed, for the compaction that comes. */
+async function storeForSubagent($: Engine, id: string, instructions: string): Promise<void> {
+  // A reading that fails holds no proposal back: its age is then unknown.
+  const reading = await measureSubagent($, id).catch(() => undefined)
+  const tokens = reading?.tokens ?? null
+  await update($, subagents, all => ({
+    ...all,
+    [id]: { proposal: { instructions, tokens }, asked: all[id]?.asked ?? 0 },
+  }))
+}
+
+/** Forgets a subagent: it was compacted, or its run has ended. */
+async function forgetSubagent($: Engine, id: string): Promise<void> {
+  if ((await read($, subagents))[id] !== undefined) {
+    await update($, subagents, all =>
+      Object.fromEntries(Object.entries(all).filter(([each]) => each !== id)),
+    )
   }
 }
 
@@ -569,27 +690,40 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Sense after every tool call of the main conversation, and hand the model
-  // the nudge with the tool's result. A subagent's background task is left
-  // out: it reports to the subagent.
+  // Sense after every tool call. The main conversation gets its nudge with
+  // the tool's result. A subagent gets the request for its instructions as a
+  // message. A subagent's background task is left out of the list: it reports
+  // to the subagent.
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
 
-    if (isOff || e.agentId !== undefined || OWN_TOOL.test(e.tool) || ran.deny !== undefined) {
+    if (isOff || OWN_TOOL.test(e.tool) || ran.deny !== undefined) {
       return ran
     }
 
-    track(e, ran.result)
+    const { agentId } = e
 
-    const note = await guarded($, 'tool.call', () => sense($), next.signal)
+    if (agentId === undefined) {
+      track(e, ran.result)
+    }
+
+    const note = await guarded(
+      $,
+      'tool.call',
+      () => (agentId === undefined ? sense($) : senseSubagent($, agentId)),
+      next.signal,
+    )
 
     return note === undefined ? ran : { ...ran, context: [...(ran.context ?? []), note] }
   })
 
-  // The tool the model calls at its breakpoint.
+  // The tool the model calls: the main conversation at its breakpoint, a
+  // subagent when it is asked.
   on('tool.call', { tool: OWN_TOOL }, async ($, e) => {
-    if (e.agentId !== undefined) {
-      return { deny: 'Only the main conversation can propose a compaction. A subagent cannot.' }
+    const { agentId } = e
+
+    if (agentId !== undefined && !(await settingsNow($)).isForSubagents) {
+      return { deny: SUBAGENTS_OFF }
     }
 
     const input = e as unknown as { instructions?: unknown }
@@ -598,6 +732,16 @@ export const register: Register = on => {
 
     if (refusal !== undefined) {
       return { deny: refusal }
+    }
+
+    if (agentId !== undefined) {
+      try {
+        await storeForSubagent($, agentId, instructions)
+
+        return { result: SUBAGENT_STORED }
+      } catch (error) {
+        return { deny: `compact-warning could not store the proposal: ${messageOf(error)}` }
+      }
     }
 
     try {
@@ -649,24 +793,35 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
 
-    if (!isOff && e.agentId === undefined) {
-      await guarded($, 'turn.complete', () => handOver($, e.reason === 'answer'), next.signal)
+    const { agentId } = e
+
+    if (!isOff) {
+      // A subagent's run is over with its turn: what the mod held for it goes.
+      await guarded(
+        $,
+        'turn.complete',
+        () => (agentId === undefined ? handOver($, e.reason === 'answer') : forgetSubagent($, agentId)),
+        next.signal,
+      )
     }
 
     return done
   })
 
-  // Every compaction of the main conversation: when none were typed, pass on
-  // the stored instructions. Never skip a real one: a full window is worse.
+  // Every compaction, of the main conversation or of a subagent: when it
+  // comes without instructions, pass on the stored ones. Never skip a real
+  // one: a full window is worse.
   on('session.compact', async ($, e, next) => {
-    if (isOff || e.agentId !== undefined) {
+    const { agentId } = e
+
+    if (isOff || (agentId !== undefined && !(await settingsNow($)).isForSubagents)) {
       return next(e)
     }
 
     // A summary computed ahead of time cannot follow instructions that are
-    // written or changed later, and the engine may reuse it. So none is kept
-    // for the main conversation: each compaction writes its summary when it
-    // runs. This skips no compaction: ahead of time, nothing is installed.
+    // written or changed later, and the engine may reuse it. So none is kept:
+    // each compaction writes its summary when it runs. This skips no
+    // compaction: ahead of time, nothing is installed.
     if (e.trigger === 'precompute') {
       return { skip: PRECOMPUTE_SKIP }
     }
@@ -675,8 +830,22 @@ export const register: Register = on => {
     // ones are the line the mod filled in. Once the conversation has moved on
     // since they were written, the summary is told so.
     const instructions = await guarded($, 'session.compact', async () => {
-      const stored = await read($, proposal)
       const typed = (e.instructions ?? '').trim()
+
+      if (agentId !== undefined) {
+        const held = (await read($, subagents))[agentId]?.proposal ?? null
+
+        if (held === null || typed !== '') {
+          return undefined
+        }
+
+        // A reading that fails holds no instructions back: their age is then unknown.
+        const reading = await measureSubagent($, agentId).catch(() => undefined)
+
+        return instructionsFor(held, reading ?? null)
+      }
+
+      const stored = await read($, proposal)
 
       if (stored === null || (typed !== '' && typed !== stored.instructions)) {
         return undefined
@@ -687,7 +856,9 @@ export const register: Register = on => {
     const outcome = await next(instructions === undefined ? e : { ...e, instructions })
 
     if (outcome.skip === undefined) {
-      await guarded($, 'session.compact', () => reset($))
+      await guarded($, 'session.compact', () =>
+        agentId === undefined ? reset($) : forgetSubagent($, agentId),
+      )
     }
 
     return outcome

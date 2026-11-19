@@ -4,6 +4,20 @@ Each release names the Claude Code versions it was checked on. The mod API is ea
 so a release can stop working on a later Claude Code. The daily check in this repository
 shows when that happens.
 
+## 0.3.0
+
+Checked on Claude Code 2.1.328.
+
+- **A subagent's compaction follows the subagent's own instructions.** When 50k tokens
+  remain before Claude Code compacts a subagent, the mod asks the subagent what the summary
+  must keep. The subagent answers and keeps working, and the compaction uses its answer.
+  Before, a subagent's compaction ran without instructions.
+- **A setting turns that off.** `/compact-warning subagents off` leaves subagents alone.
+- **Claude Code 2.1.326 or later.** Older versions do not tell a mod how full a subagent's
+  context is. On Claude Code 2.1.325, an update keeps release 0.2.1.
+- **The live check covers subagents.** `tools/live-check` runs a third session, and takes
+  the names of the checks to run.
+
 ## 0.2.1
 
 Checked on Claude Code 2.1.328.

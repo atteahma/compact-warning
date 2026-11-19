@@ -129,15 +129,15 @@ CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 CLAUDE_CODE_PLUGIN_DIRS="$PWD" claude -p 
 tools/check
 ```
 
-It runs the strict validation, with the type check, and the tests: 58 pass. It needs no
-login.
+It runs the strict validation, with the type check, and the tests. It needs no login.
 
 ```bash
 tools/live-check
 ```
 
-Two headless Haiku sessions, about two minutes, a few cents. It uses the installed mod. For
-this working copy, when it is not the installed one:
+Three headless Haiku sessions, about four minutes, about eight cents. To run one of them,
+name it: `tools/live-check subagents`. It uses the installed mod. For this working copy,
+when it is not the installed one:
 
 ```bash
 CLAUDE_CODE_PLUGIN_DIRS="$PWD" tools/live-check

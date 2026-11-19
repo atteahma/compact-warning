@@ -7,7 +7,10 @@ import {
   INSTRUCTIONS_DESCRIPTION,
   MAX_INSTRUCTIONS,
   MAX_NAMED,
+  MAX_SUBAGENT_ASKS,
   MIN_VERSION,
+  SUBAGENT_ROOM,
+  TOOL_DESCRIPTION,
   USAGE,
   ageOf,
   cleanInstructions,
@@ -42,6 +45,9 @@ import {
   stoppedOf,
   storedOf,
   storedText,
+  subagentLimitOf,
+  subagentNudgeText,
+  subagentThresholdOf,
   taskOf,
   thresholdsOf,
   toastText,
@@ -66,8 +72,11 @@ test('the settings default to 80% and 88%, a reserve of 30 000 tokens, attended'
     stop: percent(88),
     reserveTokens: 30_000,
     isUnattended: false,
+    isForSubagents: true,
   })
-  expect(settingsText(DEFAULT_SETTINGS)).toBe('warn 80%, stop 88%, reserve 30k, unattended off')
+  expect(settingsText(DEFAULT_SETTINGS)).toBe(
+    'warn 80%, stop 88%, reserve 30k, unattended off, subagents on',
+  )
 })
 
 test('the store keeps only what the person changed, and a broken value is left out', () => {
@@ -76,6 +85,7 @@ test('the store keeps only what the person changed, and a broken value is left o
     stop: tokens(300_000),
     reserveTokens: 30_000,
     isUnattended: true,
+    isForSubagents: true,
   })
   expect(
     storedOf({
@@ -83,11 +93,13 @@ test('the store keeps only what the person changed, and a broken value is left o
       stop: { unit: 'tokens', value: 0 },
       reserveTokens: -5,
       isUnattended: 'yes',
+      isForSubagents: 0,
       other: 1,
     }),
   ).toEqual({})
   expect(storedOf('not an object')).toEqual({})
   expect(storedOf({ reserveTokens: 0 })).toEqual({ reserveTokens: 0 })
+  expect(storedOf({ isForSubagents: false })).toEqual({ isForSubagents: false })
 })
 
 test('the command reads a setting and its value', () => {
@@ -123,6 +135,11 @@ test('the command reads a setting and its value', () => {
     change: { isUnattended: true },
     said: 'Set unattended to on.',
   })
+  expect(requestOf('subagents off')).toEqual({
+    kind: 'set',
+    change: { isForSubagents: false },
+    said: 'Set subagents to off.',
+  })
 })
 
 test('the command refuses what it cannot read, and says why', () => {
@@ -141,16 +158,68 @@ test('the command refuses what it cannot read, and says why', () => {
     kind: 'refuse',
     why: 'Give unattended the value on or off.',
   })
+  expect(requestOf('subagents never')).toEqual({
+    kind: 'refuse',
+    why: 'Give subagents the value on or off.',
+  })
   expect(requestOf('stop 300k now')).toEqual({ kind: 'refuse', why: 'Give one setting and one value.' })
   expect(requestOf('colour blue')).toEqual({ kind: 'refuse', why: 'There is no setting "colour".' })
   expect(USAGE).toContain('/compact-warning stop 88%')
+  expect(USAGE).toContain('/compact-warning subagents off')
+})
+
+test('a subagent is compacted where the main conversation would be, in its own window', () => {
+  const large = { window: 1_000_000, compactWindow: 1_000_000, point: LARGE }
+  const small = { window: 200_000, compactWindow: 200_000, point: SMALL }
+
+  expect(subagentLimitOf(large, 1_000_000)).toBe(LARGE)
+  // A subagent on a model with a smaller window, and one with a larger.
+  expect(subagentLimitOf(large, 200_000)).toBe(SMALL)
+  expect(subagentLimitOf(small, 1_000_000)).toBe(LARGE)
+  // A window the engine does not name counts as the main conversation's.
+  expect(subagentLimitOf(large, undefined)).toBe(LARGE)
+  // A compaction window that was set for the session holds for a subagent too.
+  expect(subagentLimitOf({ window: 1_000_000, compactWindow: 100_000, point: 67_000 }, 1_000_000)).toBe(
+    67_000,
+  )
+})
+
+test('a subagent is asked 50 000 tokens before its compaction, on a small window a quarter before', () => {
+  expect(SUBAGENT_ROOM).toBe(50_000)
+  expect(subagentThresholdOf(LARGE)).toBe(917_000)
+  expect(subagentThresholdOf(SMALL)).toBe(125_250)
+  expect(subagentThresholdOf(67_000)).toBe(50_250)
+})
+
+test('the message for a subagent asks for instructions and for no stop, and the second is a reminder', () => {
+  const note = subagentNudgeText(gaugeOf(920_000, LARGE))
+
+  expect(note).toContain(
+    '[compact-warning] From compact-warning, a Claude Code mod that the user installed.',
+  )
+  expect(note).toContain("This subagent's context is at 95% of the point")
+  expect(note).toContain('(920k of 967k tokens)')
+  expect(note).toContain('call the tool mcp__compact-warning__propose_compact before your next step')
+  expect(note).toContain('If you do not have the tool, ignore this message. After the call, keep working.')
+  expect(note).not.toContain('breakpoint')
+  expect(note).not.toContain('end your turn')
+  // A request to keep quiet about the message reads like an injected instruction.
+  expect(note).not.toContain('report')
+
+  const again = subagentNudgeText(gaugeOf(930_000, LARGE), 2)
+  expect(again).toContain('[compact-warning] A reminder from the compact-warning mod: the tool mcp__compact-warning__propose_compact has not been called')
+  expect(again).toContain('(930k of 967k tokens)')
+  expect(again).toContain('After the call, keep working.')
+  expect(MAX_SUBAGENT_ASKS).toBe(2)
+  expect(TOOL_DESCRIPTION).toContain('A subagent calls it when a message that begins with [compact-warning] asks for it')
 })
 
 test('a Claude Code older than the floor is told apart', () => {
-  expect(MIN_VERSION).toBe('2.1.325')
+  expect(MIN_VERSION).toBe('2.1.326')
   expect(isOlder('2.1.311', MIN_VERSION)).toBe(true)
   expect(isOlder('2.0.999', MIN_VERSION)).toBe(true)
-  expect(isOlder('2.1.325', MIN_VERSION)).toBe(false)
+  expect(isOlder('2.1.325', MIN_VERSION)).toBe(true)
+  expect(isOlder('2.1.326', MIN_VERSION)).toBe(false)
   expect(isOlder('2.1.328', MIN_VERSION)).toBe(false)
   expect(isOlder('2.2.0', MIN_VERSION)).toBe(false)
   expect(isOlder('3.0.0', MIN_VERSION)).toBe(false)
@@ -163,11 +232,11 @@ test('a Claude Code older than the floor is told apart', () => {
 test('below the floor the start line and the report say that the mod is off', () => {
   expect(offGreeting('2.1.311')).toEqual({
     text: 'compact-warning is off',
-    detail: ' · needs Claude Code 2.1.325 or later, this is 2.1.311',
+    detail: ' · needs Claude Code 2.1.326 or later, this is 2.1.311',
     isOff: true,
   })
   expect(offReport('2.1.311')).toBe(
-    'Health: off, needs Claude Code 2.1.325 or later, this is 2.1.311\nUpdate Claude Code to turn the mod on. Its stable channel gets a version later than its latest channel.',
+    'Health: off, needs Claude Code 2.1.326 or later, this is 2.1.311\nUpdate Claude Code to turn the mod on. Its stable channel gets a version later than its latest channel.',
   )
 })
 
@@ -367,7 +436,7 @@ const REPORT: Report = {
   told: 'none',
   proposal: null,
   settings: DEFAULT_SETTINGS,
-  engineVersion: '2.1.325',
+  engineVersion: '2.1.326',
   updates: undefined,
   lastError: undefined,
 }
@@ -424,7 +493,7 @@ test('the report says how updates arrive, and names the marketplace in the fix',
   )
 
   const lines = reportText({ ...REPORT, updates: byHand }).split('\n')
-  expect(lines[5]).toBe('Claude Code: 2.1.325')
+  expect(lines[5]).toBe('Claude Code: 2.1.326')
   expect(lines[6]).toBe(updatesText(byHand))
   expect(lines[7]).toBe('Proposal: none')
 })
@@ -435,9 +504,9 @@ test('the report is one fact to a line', () => {
       'Health: working',
       'Context: 116k of 967k tokens, 12% of auto-compact',
       'Nudges: at 774k and 851k tokens, none sent yet',
-      'Settings: warn 80%, stop 88%, reserve 30k, unattended off',
+      'Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on',
       'To change one: /compact-warning stop 300k',
-      'Claude Code: 2.1.325',
+      'Claude Code: 2.1.326',
       'Proposal: none',
     ].join('\n'),
   )
@@ -451,7 +520,7 @@ test('the report is one fact to a line', () => {
   })
 
   expect(waiting).toContain('Nudges: at 774k and 851k tokens, second sent')
-  expect(waiting).toContain('Settings: warn 80%, stop 860k, reserve 30k, unattended on\n')
+  expect(waiting).toContain('Settings: warn 80%, stop 860k, reserve 30k, unattended on, subagents on\n')
   expect(waiting).toContain('Proposal: ready for /compact, saved 20k tokens ago\nKeep the plan.')
 
   expect(reportText({ ...REPORT, gauge: null })).toContain(

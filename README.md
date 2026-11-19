@@ -20,7 +20,7 @@ Claude Code ships almost daily, and an update can break a mod. With auto-update 
 reaches you by itself. Without it, you get a fix only when you run the update command at
 the end of this page. `/compact-warning` shows which of the two holds.
 
-- **It needs** Claude Code 2.1.325 or later. On an older one the mod turns itself off and
+- **It needs** Claude Code 2.1.326 or later. On an older one the mod turns itself off and
   says so.
 - **The mod itself needs no setup,** and the install asks for nothing.
 - **New sessions load it.** In a session that is already open, run `/reload-plugins`.
@@ -56,6 +56,18 @@ background task is about to report.
 - **Claude is told to create no new files.** If your project has no place for the state,
   the instructions carry it.
 
+### Subagents
+
+A subagent has nobody at a prompt: Claude Code compacts it by itself when its context is
+full. The mod makes that compaction follow the subagent's own instructions.
+
+| When | What happens |
+|---|---|
+| 50k tokens remain before a subagent's auto-compaction | The mod asks the subagent for its instructions. The subagent writes them and keeps working. |
+| Claude Code compacts the subagent | That compaction uses the instructions. |
+
+Nothing of this shows in your session, and the main conversation is not interrupted.
+
 ## What you see
 
 When a session starts, above the prompt for 10 seconds:
@@ -86,7 +98,7 @@ prints a report:
 Health: working
 Context: 116k of 967k tokens, 12% of auto-compact
 Nudges: at 774k and 851k tokens, none sent yet
-Settings: warn 80%, stop 88%, reserve 30k, unattended off
+Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on
 To change one: /compact-warning stop 300k
 Claude Code: 2.1.328
 Updates: automatic
@@ -110,6 +122,7 @@ value. The change holds at once, for every session on this machine.
 | `stop` | 88% | The second nudge, in the same two forms. |
 | `reserve` | 30k | Room for the hand-over. On a small window, both nudges come earlier, so that this many tokens remain before auto-compaction. `0` turns it off. |
 | `unattended` | off | On: when the turn with the proposal ends, the mod compacts and tells Claude to continue. Off: it fills the prompt box and waits for Enter. |
+| `subagents` | on | On: a subagent is asked for its instructions before Claude Code compacts it. Off: subagents are left alone. |
 
 - **To compact near 300k tokens on a 1M window,** set `warn` to `250k` and `stop` to
   `300k`. A token count never comes later than the default percentage, so a small window
@@ -131,7 +144,7 @@ A hook that fails is skipped: the session carries on with plain auto-compaction.
 | You see | It means | What to do |
 |---|---|---|
 | No green line when a session starts | The mod is not loaded, or its start check failed. An update of Claude Code can cause either. | Update the mod, as shown below, and start a new session. If the line is still missing, run `/compact-warning`. If Claude Code does not know the command, check `claude plugin list`. |
-| `compact-warning is off` when a session starts | Your Claude Code is older than 2.1.325. | Update Claude Code. Its stable channel gets a version later than its latest channel. |
+| `compact-warning is off` when a session starts | Your Claude Code is older than 2.1.326. | Update Claude Code. Its stable channel gets a version later than its latest channel. |
 | `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod, as shown below. If the error stays, open an issue with the message. |
 
 An organization that manages Claude Code can block mods that its users install.

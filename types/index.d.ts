@@ -11,6 +11,14 @@ export type Proposal = {
   isHandedOver: boolean
 }
 
+/** What the mod holds for a subagent whose context is close to its compaction. */
+export type SubagentState = {
+  /** The compaction it proposed; null while it was asked and has not answered. */
+  proposal: Pick<Proposal, 'instructions' | 'tokens'> | null
+  /** How often the mod has asked it for one since its context last filled. */
+  asked: number
+}
+
 /** One reading of the context against its limit. */
 export type Gauge = {
   /** Input tokens of the last response. */
@@ -48,6 +56,8 @@ declare module 'claude-code' {
       gauge: Gauge | null
       isRowHidden: boolean
       greeting: Greeting | null
+      /** By agent id. An entry goes when its subagent is compacted or ends its run. */
+      subagents: Record<string, SubagentState>
     }
   }
 }

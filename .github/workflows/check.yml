@@ -32,7 +32,7 @@ jobs:
       - name: Check the mod
         run: tools/check
 
-  # Two real sessions, which the tests' stand-ins cannot replace. The job needs a
+  # Three real sessions, which the tests' stand-ins cannot replace. The job needs a
   # login: without the secret it says so and passes. docs/development.md says
   # how to add the secret.
   live:
@@ -57,7 +57,7 @@ jobs:
       - name: Install Claude Code from the latest channel
         if: steps.token.outputs.present == 'true'
         run: npm install --global "@anthropic-ai/claude-code@latest"
-      - name: Run two real sessions with the mod
+      - name: Run three real sessions with the mod
         if: steps.token.outputs.present == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

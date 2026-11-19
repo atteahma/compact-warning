@@ -31,6 +31,14 @@ answer from a subagent or a background task is about to arrive.
 If the tool does not exist, the mod is not loaded. Then print the `/compact <instructions>`
 line in the chat for the user to paste, and say that the mod is missing.
 
+## In a subagent
+
+The steps above are for the main conversation. A subagent gets a message from the mod
+shortly before Claude Code compacts it. Call the tool with the instructions, then keep
+working. Do not
+end your turn for it, and write no state document: the compaction comes by itself, and its
+summary follows the instructions.
+
 ## The instructions
 
 Say what to keep, most important first, then what to drop. Aim for 3000 characters: point at
