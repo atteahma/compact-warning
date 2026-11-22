@@ -1,7 +1,7 @@
 # Changelog
 
-Each release names the Claude Code versions it was checked on. The mod API is early access,
-so a release can stop working on a later Claude Code. The daily check in this repository
+Each release names the Claude Code versions it was checked on. Claude Code ships almost
+daily, so a release can stop working on a later version. The daily check in this repository
 shows when that happens.
 
 ## 0.3.0

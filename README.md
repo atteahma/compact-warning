@@ -138,8 +138,8 @@ value. The change holds at once, for every session on this machine.
 
 ## If something looks wrong
 
-Mods are an early-access part of Claude Code, and an update of Claude Code can break one.
-A hook that fails is skipped: the session carries on with plain auto-compaction.
+An update of Claude Code can break a mod. A hook that fails is skipped: the session
+carries on with plain auto-compaction.
 
 | You see | It means | What to do |
 |---|---|---|
