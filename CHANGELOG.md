@@ -6,7 +6,8 @@ shows when that happens.
 
 ## 0.3.0
 
-Checked on Claude Code 2.1.328.
+Checked on Claude Code 2.1.328 and 2.1.330. The tests also pass on 2.1.326, the oldest
+version it runs on.
 
 - **A subagent's compaction follows the subagent's own instructions.** When 50k tokens
   remain before Claude Code compacts a subagent, the mod asks the subagent what the summary
