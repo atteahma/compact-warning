@@ -20,7 +20,7 @@ Claude Code ships almost daily, and an update can break a mod. With auto-update 
 reaches you by itself. Without it, you get a fix only when you run the update command at
 the end of this page. `/compact-warning` shows which of the two holds.
 
-- **It needs** Claude Code 2.1.326 or later. On an older one the mod turns itself off and
+- **It needs** Claude Code 2.1.325 or later. On an older one the mod turns itself off and
   says so.
 - **The mod itself needs no setup,** and the install asks for nothing.
 - **New sessions load it.** In a session that is already open, run `/reload-plugins`.
@@ -66,7 +66,9 @@ full. The mod makes that compaction follow the subagent's own instructions.
 | 50k tokens remain before a subagent's auto-compaction | The mod asks the subagent for its instructions. The subagent writes them and keeps working. |
 | Claude Code compacts the subagent | That compaction uses the instructions. |
 
-Nothing of this shows in your session, and the main conversation is not interrupted.
+Nothing of this shows in your session, and the main conversation is not interrupted. This
+part needs Claude Code 2.1.326 or later. On 2.1.325, `/compact-warning` says that subagents
+are not asked.
 
 ## What you see
 
@@ -144,7 +146,7 @@ carries on with plain auto-compaction.
 | You see | It means | What to do |
 |---|---|---|
 | No green line when a session starts | The mod is not loaded, or its start check failed. An update of Claude Code can cause either. | Update the mod, as shown below, and start a new session. If the line is still missing, run `/compact-warning`. If Claude Code does not know the command, check `claude plugin list`. |
-| `compact-warning is off` when a session starts | Your Claude Code is older than 2.1.326. | Update Claude Code. Its stable channel gets a version later than its latest channel. |
+| `compact-warning is off` when a session starts | Your Claude Code is older than 2.1.325. | Update Claude Code. Its stable channel gets a version later than its latest channel. |
 | `error in <hook>: <message>` under the prompt | A hook of the mod failed. | Update the mod, as shown below. If the error stays, open an issue with the message. |
 
 An organization that manages Claude Code can block mods that its users install.

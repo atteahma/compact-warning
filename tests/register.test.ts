@@ -270,7 +270,7 @@ test('on a Claude Code older than the floor the mod is off, and says so', async 
   expect(await greenLine($)).toBeUndefined()
   const { line, detail } = await offLine($)
   expect(line?.props['color']).toBe('warning')
-  expect(detail?.text).toBe(' · needs Claude Code 2.1.326 or later, this is 2.1.311')
+  expect(detail?.text).toBe(' · needs Claude Code 2.1.325 or later, this is 2.1.311')
 
   // No nudge, no status line, no toast: every hook passes its event on.
   const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
@@ -281,7 +281,7 @@ test('on a Claude Code older than the floor the mod is off, and says so', async 
   expect(w.toasts).toEqual([])
 
   const report = await $.command.run(STATUS_COMMAND)
-  expect(report.text).toContain('Health: off, needs Claude Code 2.1.326 or later, this is 2.1.311')
+  expect(report.text).toContain('Health: off, needs Claude Code 2.1.325 or later, this is 2.1.311')
 })
 
 test('a broken context reading fails the start check', async ($, on) => {
@@ -505,6 +505,31 @@ test("a subagent's instructions reach its compaction when its context cannot be 
   await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'a1' })
 
   expect(w.compactions).toEqual([{ trigger: 'auto', instructions: 'Keep the task.' }])
+})
+
+test('on Claude Code 2.1.325 the mod works, and leaves subagents alone', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: at(80), agents: [worker('a1', 950_000)], version: '2.1.325' })
+  await $.session.start(START)
+
+  // The main conversation is nudged as on any newer Claude Code.
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'look for a good breakpoint',
+  )
+
+  // A subagent is not asked, cannot propose, and its compaction is left as it comes.
+  expect((await workerCall($, 'a1')).context ?? []).toEqual([])
+  expect(w.sends).toEqual([])
+  const refused = await $.tool.call({ tool: TOOL, instructions: 'Keep the task.', agentId: 'a1' } as never)
+  expect(refused.deny).toBe('Only the main conversation can propose a compaction. A subagent cannot.')
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES, agentId: 'a1' })
+  expect(w.compactions).toEqual([{ trigger: 'precompute', instructions: undefined }])
+
+  const report = await $.command.run(STATUS_COMMAND)
+  expect(report.text).toContain('Health: working')
+  expect(report.text).toContain(
+    'Claude Code: 2.1.325\nSubagents: not asked on this Claude Code. That part needs 2.1.326 or later.',
+  )
 })
 
 test("an agent list that fails leaves a subagent's tool call as it was", async ($, on) => {

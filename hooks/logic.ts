@@ -57,7 +57,7 @@ export const MAX_SUBAGENT_ASKS = 2
  * The oldest Claude Code the mod runs on. The manifest's `engines` states the
  * same floor, but a Claude Code older than 2.1.323 does not read it.
  */
-export const MIN_VERSION = '2.1.326'
+export const MIN_VERSION = '2.1.325'
 
 const VERSION_PARTS = /^(\d+)\.(\d+)\.(\d+)/
 
@@ -257,6 +257,37 @@ export function settingsText(settings: Settings): string {
     `unattended ${settings.isUnattended ? 'on' : 'off'}`,
     `subagents ${settings.isForSubagents ? 'on' : 'off'}`,
   ].join(', ')
+}
+
+/**
+ * The oldest Claude Code on which the mod can ask a subagent: from this
+ * version, `$.agent.list()` tells a mod how full a subagent's context is. A
+ * part that needs a newer Claude Code than the rest checks for itself and says
+ * so in the report. It does not raise the floor of the whole mod: release
+ * 0.3.0 did that, and so turned the mod off in every session on 2.1.325.
+ */
+export const SUBAGENTS_MIN_VERSION = '2.1.326'
+
+function isTooOldForSubagents(version: string | undefined): boolean {
+  return version !== undefined && isOlder(version, SUBAGENTS_MIN_VERSION)
+}
+
+/**
+ * True when the mod asks subagents: the setting is on, and this Claude Code
+ * shows a mod how full a subagent is. An unknown version counts as new enough.
+ */
+export function asksSubagents(settings: Settings, version: string | undefined): boolean {
+  return settings.isForSubagents && !isTooOldForSubagents(version)
+}
+
+/**
+ * The report's line on a Claude Code that is too old for the subagent part;
+ * undefined when the part works, or is set to off.
+ */
+export function subagentsLine(settings: Settings, version: string | undefined): string | undefined {
+  return settings.isForSubagents && isTooOldForSubagents(version)
+    ? `Subagents: not asked on this Claude Code. That part needs ${SUBAGENTS_MIN_VERSION} or later.`
+    : undefined
 }
 
 /** Where the two nudges come, in tokens of context. */
@@ -890,6 +921,7 @@ function proposalLine(proposal: Proposal | null, gauge: Gauge | null): string {
 /** What /compact-warning prints. */
 export function reportText(report: Report): string {
   const { gauge, limit, told, proposal, settings, engineVersion, updates, lastError } = report
+  const subagents = subagentsLine(settings, engineVersion)
 
   return [
     healthText(lastError, updates?.marketplace),
@@ -898,6 +930,7 @@ export function reportText(report: Report): string {
     `Settings: ${settingsText(settings)}`,
     `To change one: /${COMMAND} stop 300k`,
     `Claude Code: ${engineVersion ?? 'unknown version'}`,
+    ...(subagents === undefined ? [] : [subagents]),
     ...(updates === undefined ? [] : [updatesText(updates)]),
     proposalLine(proposal, gauge),
   ].join('\n')

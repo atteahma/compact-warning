@@ -9,10 +9,12 @@ import {
   MAX_NAMED,
   MAX_SUBAGENT_ASKS,
   MIN_VERSION,
+  SUBAGENTS_MIN_VERSION,
   SUBAGENT_ROOM,
   TOOL_DESCRIPTION,
   USAGE,
   ageOf,
+  asksSubagents,
   cleanInstructions,
   compactLine,
   endedIn,
@@ -48,6 +50,7 @@ import {
   subagentLimitOf,
   subagentNudgeText,
   subagentThresholdOf,
+  subagentsLine,
   taskOf,
   thresholdsOf,
   toastText,
@@ -168,6 +171,26 @@ test('the command refuses what it cannot read, and says why', () => {
   expect(USAGE).toContain('/compact-warning subagents off')
 })
 
+test('the subagent part needs a newer Claude Code than the rest, and says so', () => {
+  expect(SUBAGENTS_MIN_VERSION).toBe('2.1.326')
+  expect(asksSubagents(DEFAULT_SETTINGS, '2.1.325')).toBe(false)
+  expect(asksSubagents(DEFAULT_SETTINGS, '2.1.326')).toBe(true)
+  // A version that cannot be read holds nothing back.
+  expect(asksSubagents(DEFAULT_SETTINGS, undefined)).toBe(true)
+  expect(asksSubagents(withSettings({ isForSubagents: false }), '2.1.330')).toBe(false)
+
+  expect(subagentsLine(DEFAULT_SETTINGS, '2.1.325')).toBe(
+    'Subagents: not asked on this Claude Code. That part needs 2.1.326 or later.',
+  )
+  expect(subagentsLine(DEFAULT_SETTINGS, '2.1.326')).toBe(undefined)
+  // Set to off, there is nothing to explain.
+  expect(subagentsLine(withSettings({ isForSubagents: false }), '2.1.325')).toBe(undefined)
+
+  const lines = reportText({ ...REPORT, engineVersion: '2.1.325' }).split('\n')
+  expect(lines[5]).toBe('Claude Code: 2.1.325')
+  expect(lines[6]).toBe('Subagents: not asked on this Claude Code. That part needs 2.1.326 or later.')
+})
+
 test('a subagent is compacted where the main conversation would be, in its own window', () => {
   const large = { window: 1_000_000, compactWindow: 1_000_000, point: LARGE }
   const small = { window: 200_000, compactWindow: 200_000, point: SMALL }
@@ -215,11 +238,11 @@ test('the message for a subagent asks for instructions and for no stop, and the 
 })
 
 test('a Claude Code older than the floor is told apart', () => {
-  expect(MIN_VERSION).toBe('2.1.326')
+  expect(MIN_VERSION).toBe('2.1.325')
   expect(isOlder('2.1.311', MIN_VERSION)).toBe(true)
   expect(isOlder('2.0.999', MIN_VERSION)).toBe(true)
-  expect(isOlder('2.1.325', MIN_VERSION)).toBe(true)
-  expect(isOlder('2.1.326', MIN_VERSION)).toBe(false)
+  expect(isOlder('2.1.324', MIN_VERSION)).toBe(true)
+  expect(isOlder('2.1.325', MIN_VERSION)).toBe(false)
   expect(isOlder('2.1.328', MIN_VERSION)).toBe(false)
   expect(isOlder('2.2.0', MIN_VERSION)).toBe(false)
   expect(isOlder('3.0.0', MIN_VERSION)).toBe(false)
@@ -232,11 +255,11 @@ test('a Claude Code older than the floor is told apart', () => {
 test('below the floor the start line and the report say that the mod is off', () => {
   expect(offGreeting('2.1.311')).toEqual({
     text: 'compact-warning is off',
-    detail: ' · needs Claude Code 2.1.326 or later, this is 2.1.311',
+    detail: ' · needs Claude Code 2.1.325 or later, this is 2.1.311',
     isOff: true,
   })
   expect(offReport('2.1.311')).toBe(
-    'Health: off, needs Claude Code 2.1.326 or later, this is 2.1.311\nUpdate Claude Code to turn the mod on. Its stable channel gets a version later than its latest channel.',
+    'Health: off, needs Claude Code 2.1.325 or later, this is 2.1.311\nUpdate Claude Code to turn the mod on. Its stable channel gets a version later than its latest channel.',
   )
 })
 

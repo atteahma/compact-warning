@@ -4,6 +4,15 @@ Each release names the Claude Code versions it was checked on. Claude Code ships
 daily, so a release can stop working on a later version. The daily check in this repository
 shows when that happens.
 
+## 0.3.1
+
+Checked on Claude Code 2.1.330. The tests also pass on 2.1.325, the oldest version it runs
+on.
+
+- **The mod works on Claude Code 2.1.325 again.** Release 0.3.0 raised the floor to 2.1.326
+  for its subagent part, and so turned the whole mod off on 2.1.325. Now only the subagent
+  part needs 2.1.326. On 2.1.325, `/compact-warning` says that subagents are not asked.
+
 ## 0.3.0
 
 Checked on Claude Code 2.1.328 and 2.1.330. The tests also pass on 2.1.326, the oldest

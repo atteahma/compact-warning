@@ -15,7 +15,7 @@
 // line above the prompt says for a few seconds that the checks passed.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { AgentInfo, EngineInterface, Register } from 'claude-code'
 
 import type { Gauge } from '../types'
 import {
@@ -36,6 +36,7 @@ import {
   UPDATES_TOLD_KEY,
   USAGE,
   ageOf,
+  asksSubagents,
   cleanInstructions,
   compactLine,
   endedIn,
@@ -74,6 +75,12 @@ import {
 import type { GreetingText, Settings, StoredSettings, Task, Updates } from './logic'
 
 type Engine = EngineInterface
+
+/**
+ * What Claude Code lists for an agent from 2.1.326 on: the size of its context
+ * and its model's window. An older one leaves both out, and its types too.
+ */
+type Sized = { tokenCount?: number; contextWindowSize?: number }
 
 // The mod's own tool, matched by pattern: the typed tool names are only
 // the ones that were connected when the engine last wrote the types.
@@ -398,10 +405,11 @@ async function measureSubagent($: Engine, id: string): Promise<Gauge | undefined
     return undefined
   }
 
-  const agent = (await $.agent.list()).find(each => each.id === id)
+  const agent: (AgentInfo & Sized) | undefined = (await $.agent.list()).find(each => each.id === id)
+  const tokens = agent?.tokenCount
 
   // No reading yet. A count that is missing is no reading either.
-  if (agent === undefined || !(agent.tokenCount > 0)) {
+  if (agent === undefined || tokens === undefined || !(tokens > 0)) {
     return undefined
   }
 
@@ -410,7 +418,7 @@ async function measureSubagent($: Engine, id: string): Promise<Gauge | undefined
     agent.contextWindowSize,
   )
 
-  return gaugeOf(agent.tokenCount, limit)
+  return gaugeOf(tokens, limit)
 }
 
 /**
@@ -433,7 +441,7 @@ async function tell($: Engine, id: string, text: string): Promise<boolean> {
  * A subagent that reads on gets one reminder.
  */
 async function senseSubagent($: Engine, id: string): Promise<string | undefined> {
-  if (sensing.has(id) || !(await settingsNow($)).isForSubagents) {
+  if (sensing.has(id) || !asksSubagents(await settingsNow($), engineVersion)) {
     return undefined
   }
 
@@ -722,7 +730,7 @@ export const register: Register = on => {
   on('tool.call', { tool: OWN_TOOL }, async ($, e) => {
     const { agentId } = e
 
-    if (agentId !== undefined && !(await settingsNow($)).isForSubagents) {
+    if (agentId !== undefined && !asksSubagents(await settingsNow($), engineVersion)) {
       return { deny: SUBAGENTS_OFF }
     }
 
@@ -814,7 +822,7 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     const { agentId } = e
 
-    if (isOff || (agentId !== undefined && !(await settingsNow($)).isForSubagents)) {
+    if (isOff || (agentId !== undefined && !asksSubagents(await settingsNow($), engineVersion))) {
       return next(e)
     }
 

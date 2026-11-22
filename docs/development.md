@@ -93,8 +93,16 @@ The floor is stated twice, and `tools/check` fails when the two differ:
   loads the mod anyway. There the mod turns itself off: its hooks pass every event on, the
   start line says `compact-warning is off`, and `/compact-warning` says why.
 
-The floor is 2.1.326: from that version, `$.agent.list()` tells a mod how full a
-subagent's context is. A person on an older Claude Code keeps release 0.2.1.
+**A part that needs a newer Claude Code gates itself.** The subagent part needs 2.1.326
+(`SUBAGENTS_MIN_VERSION`): from that version, `$.agent.list()` tells a mod how full a
+subagent's context is. On 2.1.325 the rest of the mod works, subagents are left alone, and
+the report says so. Do not raise the floor of the whole mod for one part. Release 0.3.0
+did, and turned the mod off in every session that still ran 2.1.325: a session keeps the
+Claude Code it started with, for days.
+
+The code must pass `tools/check` on the floor and on the newest Claude Code. A field that
+the floor's types lack is read through a type of its own, as `Sized` in
+`hooks/register.tsx` does.
 
 On a Claude Code older than the floor, `tools/check` checks the manifest only.
 
