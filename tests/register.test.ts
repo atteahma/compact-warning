@@ -6,6 +6,8 @@ const TOOL = 'mcp__compact-warning__propose_compact'
 const WINDOW = 1_000_000
 const LIMIT = 967_000
 const VERSION = '2.1.326'
+/** The session's project root, unless a test gives another. */
+const PROJECT = '/work/app'
 
 /** `percent` of the auto-compaction point, in tokens. */
 const at = (percent: number): number => Math.ceil((LIMIT * percent) / 100)
@@ -20,8 +22,12 @@ type World = {
   draft: string
   /** The Claude Code the session runs on. */
   version: string
+  /** The session's project root; undefined when it cannot be read. */
+  root: string | undefined
   /** What the mod's store holds under its settings key at the start. */
   settings: unknown
+  /** What else the mod's store holds at the start, such as a folder's settings. */
+  store: Readonly<Record<string, unknown>>
   isUsageBroken: boolean
   agents: AgentInfo[]
   isAgentListBroken: boolean
@@ -44,7 +50,9 @@ function world(on: On, start: Partial<World> = {}): World {
     limit: LIMIT,
     draft: '',
     version: VERSION,
+    root: PROJECT,
     settings: undefined,
+    store: {},
     isUsageBroken: false,
     agents: [],
     isAgentListBroken: false,
@@ -59,9 +67,16 @@ function world(on: On, start: Partial<World> = {}): World {
     ...start,
   }
 
-  mock.store(on, w.settings === undefined ? {} : { settings: w.settings })
+  mock.store(on, { ...w.store, ...(w.settings === undefined ? {} : { settings: w.settings }) })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.version', () => ({ value: { version: w.version } }))
+  on('session.root', () => {
+    if (w.root === undefined) {
+      throw new Error('the root is gone')
+    }
+
+    return { value: w.root }
+  })
   on('session.usage', (_, e) => {
     if (w.isUsageBroken) {
       throw new Error('usage is gone')
@@ -347,6 +362,192 @@ test('/compact-warning changes a setting for every session, and puts the default
   expect(reset.text).toContain('Put the settings back to their defaults.')
   expect(reset.text).toContain('Nudges: at 774k and 851k tokens')
   expect(reset.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on\n')
+})
+
+test('a project change holds at once in this session, and the report shows it', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: 249_000 })
+  await $.session.start(START)
+
+  const set = await $.command.run({ ...STATUS_COMMAND, args: 'project stop 300k' })
+  expect(set.text).toContain('Set stop to 300k for this project.\n\nHealth: working')
+  expect(set.text).toContain(
+    [
+      'Settings: warn 80%, stop 300k, reserve 30k, unattended off, subagents on',
+      'Set for this project: stop 300k',
+      'To change one: /compact-warning stop 300k',
+      'For this project only: /compact-warning project stop 300k',
+      'Claude Code:',
+    ].join('\n'),
+  )
+
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
+  w.tokens = 300_000
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'Stop at the next breakpoint',
+  )
+})
+
+test('another project does not get it, and a report right after /cd shows the new one', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: 300_000 })
+  await $.session.start(START)
+  await $.command.run({ ...STATUS_COMMAND, args: 'project stop 300k' })
+
+  // The same store, read from another root.
+  w.root = '/work/app2'
+  const there = await $.command.run(STATUS_COMMAND)
+  expect(there.text).toContain('Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on\n')
+  expect(there.text).not.toContain('Set for')
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
+})
+
+test("a session in the project's Claude Code worktree gets its settings, and changes them for the repository", async ($, on) => {
+  mock.clock(on)
+  const w = world(on, {
+    tokens: 300_000,
+    root: `${PROJECT}/.claude/worktrees/fix-login`,
+    store: { [`settings:${PROJECT}`]: { stop: tokens(300_000) } },
+  })
+  await $.session.start(START)
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.[0]).toContain(
+    'Stop at the next breakpoint',
+  )
+
+  const set = await $.command.run({ ...STATUS_COMMAND, args: 'project unattended on' })
+  expect(set.text).toContain('Set for this project: stop 300k, unattended on\n')
+
+  w.root = PROJECT
+  const repository = await $.command.run(STATUS_COMMAND)
+  expect(repository.text).toContain('Set for this project: stop 300k, unattended on\n')
+})
+
+test("a folder around the project applies, and the project's own setting wins over it", async ($, on) => {
+  mock.clock(on)
+  world(on, {
+    tokens: at(12),
+    settings: { warn: percent(70) },
+    store: {
+      'settings:/work': { stop: tokens(400_000), isUnattended: true },
+      [`settings:${PROJECT}`]: { stop: tokens(300_000) },
+      'settings:/work/app2': { reserveTokens: 0 },
+      // A value that does not fit counts as not set.
+      'settings:/': 'broken',
+    },
+  })
+  await $.session.start(START)
+
+  const report = await $.command.run(STATUS_COMMAND)
+  expect(report.text).toContain(
+    [
+      'Settings: warn 70%, stop 300k, reserve 30k, unattended on, subagents on',
+      'Set for /work: stop 400k, unattended on',
+      'Set for this project: stop 300k',
+      'To change one: /compact-warning stop 300k',
+    ].join('\n'),
+  )
+})
+
+test("project reset removes only the project's own settings", async ($, on) => {
+  mock.clock(on)
+  world(on, {
+    tokens: at(12),
+    store: {
+      'settings:/work': { isUnattended: true },
+      [`settings:${PROJECT}`]: { stop: tokens(300_000) },
+    },
+  })
+  await $.session.start(START)
+
+  const reset = await $.command.run({ ...STATUS_COMMAND, args: 'project reset' })
+  expect(reset.text).toContain("Removed this project's settings.\n\nHealth: working")
+  expect(reset.text).toContain(
+    'Settings: warn 80%, stop 88%, reserve 30k, unattended on, subagents on\nSet for /work: unattended on\nTo change one',
+  )
+
+  const again = await $.command.run({ ...STATUS_COMMAND, args: 'project reset' })
+  expect(again.text).toContain('This project has no settings of its own.\n\nHealth: working')
+})
+
+test("plain reset leaves the project's settings, and says so", async ($, on) => {
+  mock.clock(on)
+  world(on, {
+    tokens: at(12),
+    settings: { isUnattended: true, reserveTokens: 0 },
+    store: { [`settings:${PROJECT}`]: { stop: tokens(300_000) } },
+  })
+  await $.session.start(START)
+
+  const reset = await $.command.run({ ...STATUS_COMMAND, args: 'reset' })
+  expect(reset.text).toContain(
+    'Put the settings back to their defaults. This project keeps its own.\n\nHealth: working',
+  )
+  expect(reset.text).toContain(
+    'Settings: warn 80%, stop 300k, reserve 30k, unattended off, subagents on\nSet for this project: stop 300k\n',
+  )
+})
+
+test('a machine change that a folder overrides says that it does not hold here', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { tokens: at(12), store: { [`settings:${PROJECT}`]: { stop: tokens(300_000) } } })
+  await $.session.start(START)
+
+  const set = await $.command.run({ ...STATUS_COMMAND, args: 'stop 65%' })
+  expect(set.text).toContain(
+    'Set stop to 65%. It does not hold here: stop 300k is set for this project.\n\nHealth: working',
+  )
+  expect(set.text).toContain('Settings: warn 80%, stop 300k, reserve 30k')
+
+  // In a folder inside the project, the folder that sets it is named.
+  w.root = `${PROJECT}/src`
+  const inside = await $.command.run({ ...STATUS_COMMAND, args: 'stop 70%' })
+  expect(inside.text).toContain(
+    `Set stop to 70%. It does not hold here: stop 300k is set for ${PROJECT}.\n\nHealth: working`,
+  )
+
+  // A setting that no folder sets holds.
+  const unattended = await $.command.run({ ...STATUS_COMMAND, args: 'unattended on' })
+  expect(unattended.text).toContain('Set unattended to on.\n\nHealth: working')
+})
+
+test("an unattended project compacts unattended while the machine's setting is off", async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on, {
+    tokens: at(85),
+    settings: { isUnattended: false },
+    store: { [`settings:${PROJECT}`]: { isUnattended: true } },
+  })
+  await $.session.start(START)
+  const stored = await propose($, 'Keep the plan.')
+  expect(String(stored.result)).toContain('compacts the conversation')
+
+  await $.turn.complete(TURN_END)
+  expect(w.fills).toEqual([])
+  await clock.advance(1000)
+  expect(w.compactions).toEqual([{ trigger: 'plugin', instructions: 'Keep the plan.' }])
+})
+
+test('a session whose root cannot be read uses the machine settings, and refuses a project change', async ($, on) => {
+  mock.clock(on)
+  world(on, {
+    tokens: at(12),
+    root: undefined,
+    settings: { isUnattended: true },
+    store: { [`settings:${PROJECT}`]: { stop: tokens(300_000) } },
+  })
+  await $.session.start(START)
+
+  const report = await $.command.run(STATUS_COMMAND)
+  expect(report.text).toContain('Health: working')
+  expect(report.text).toContain(
+    'Settings: warn 80%, stop 88%, reserve 30k, unattended on, subagents on\nTo change one: /compact-warning stop 300k\nClaude Code:',
+  )
+
+  const refused = await $.command.run({ ...STATUS_COMMAND, args: 'project stop 300k' })
+  expect(refused.text).toContain(
+    'This session has no project folder, so it has no settings of its own.\n\nSettings:\n/compact-warning warn 80%',
+  )
+  expect(refused.text).not.toContain('Health:')
 })
 
 test('each threshold is told once, with the tool result', async ($, on) => {

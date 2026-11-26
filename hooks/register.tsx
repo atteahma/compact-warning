@@ -24,6 +24,7 @@ import {
   MAX_SUBAGENT_ASKS,
   MAX_TASKS,
   MIN_VERSION,
+  NO_PROJECT,
   PRECOMPUTE_SKIP,
   RESUME_PROMPT,
   SETTINGS_KEY,
@@ -37,10 +38,13 @@ import {
   USAGE,
   ageOf,
   asksSubagents,
+  changedText,
   cleanInstructions,
   compactLine,
   endedIn,
   errorToast,
+  folderKey,
+  foldersFor,
   gaugeOf,
   greetingText,
   hasShrunk,
@@ -54,6 +58,7 @@ import {
   nudgeText,
   offGreeting,
   offReport,
+  projectOf,
   readyHint,
   readyText,
   refusalOf,
@@ -72,7 +77,7 @@ import {
   thresholdsOf,
   toastText,
 } from './logic'
-import type { GreetingText, Settings, StoredSettings, Task, Updates } from './logic'
+import type { GreetingText, Layer, Settings, StoredSettings, Task, Updates } from './logic'
 
 type Engine = EngineInterface
 
@@ -98,8 +103,8 @@ const LIMIT_TTL_MS = 5 * 60 * 1000
 /** After this long, a reading that never finished no longer holds others back. */
 const SENSE_STALE_MS = 30 * 1000
 /**
- * How long the settings are trusted before the store is read again: a change
- * made in one session reaches the others within this time.
+ * How long the settings are trusted before the store and the project are read
+ * again: a change made in one session reaches the others within this time.
  */
 const SETTINGS_TTL_MS = 10 * 1000
 /** The wait between the end of a turn and an unattended compaction. */
@@ -119,8 +124,16 @@ type Limit = {
   compactWindow: number
 }
 
+/** The settings in force, and the project and the folders they were read for. */
+type SettingsHere = {
+  settings: Settings
+  /** Undefined when the session's root cannot be read. */
+  project: string | undefined
+  layers: Layer[]
+}
+
 let limitCache: (Limit & { window: number; at: number }) | undefined
-let settingsCache: { settings: Settings; at: number } | undefined
+let settingsCache: (SettingsHere & { at: number }) | undefined
 let senseStartedAt: number | undefined
 /** The subagents whose fill is being read: of several calls at once, one reads. */
 const sensing = new Set<string>()
@@ -199,36 +212,78 @@ async function guarded<T>(
   }
 }
 
+/** A value from the store; undefined when it cannot be read. */
+async function storedAt($: Engine, key: string): Promise<unknown> {
+  try {
+    return await $.store.get(key)
+  } catch {
+    return undefined
+  }
+}
+
+/** The session's project; undefined when its root cannot be read. */
+async function projectNow($: Engine): Promise<string | undefined> {
+  try {
+    return projectOf(await $.session.root())
+  } catch {
+    return undefined
+  }
+}
+
 /**
- * The settings in force, read from the store at most every few seconds. A
- * store that cannot be read holds no nudge back: the defaults then apply.
+ * The settings of the folders that hold in the project, outermost first. A
+ * folder whose settings cannot be read, or hold nothing valid, is left out.
  */
-async function settingsNow($: Engine): Promise<Settings> {
+async function layersOf($: Engine, project: string): Promise<Layer[]> {
+  let keys: string[]
+
+  try {
+    keys = await $.store.keys()
+  } catch {
+    return []
+  }
+
+  const layers = await Promise.all(
+    foldersFor(keys, project).map(async folder => ({
+      folder,
+      stored: storedOf(await storedAt($, folderKey(folder))),
+    })),
+  )
+
+  return layers.filter(layer => Object.keys(layer.stored).length > 0)
+}
+
+/**
+ * The settings in force, read at most every few seconds, with the project and
+ * the folders they come from. What cannot be read holds no nudge back: it
+ * counts as not set.
+ */
+async function settingsHere($: Engine): Promise<SettingsHere> {
   const now = Date.now()
 
   if (settingsCache !== undefined && now - settingsCache.at < SETTINGS_TTL_MS) {
-    return settingsCache.settings
+    return settingsCache
   }
 
-  let stored: unknown
+  const project = await projectNow($)
+  const layers = project === undefined ? [] : await layersOf($, project)
+  const settings = settingsOf(await storedAt($, SETTINGS_KEY), layers)
+  settingsCache = { settings, project, layers, at: now }
 
-  try {
-    stored = await $.store.get(SETTINGS_KEY)
-  } catch {
-    stored = undefined
-  }
-
-  settingsCache = { settings: settingsOf(stored), at: now }
-
-  return settingsCache.settings
+  return settingsCache
 }
 
-/** Saves a change to the settings, or with no change puts the defaults back. */
-async function saveSettings($: Engine, change?: StoredSettings): Promise<void> {
+/** The settings in force in this session. */
+async function settingsNow($: Engine): Promise<Settings> {
+  return (await settingsHere($)).settings
+}
+
+/** Saves a change to the settings under `key`, or with no change removes them. */
+async function saveSettings($: Engine, key: string, change: StoredSettings | undefined): Promise<void> {
   if (change === undefined) {
-    await $.store.delete(SETTINGS_KEY)
+    await $.store.delete(key)
   } else {
-    await $.store.set(SETTINGS_KEY, { ...storedOf(await $.store.get(SETTINGS_KEY)), ...change })
+    await $.store.set(key, { ...storedOf(await $.store.get(key)), ...change })
   }
 
   settingsCache = undefined
@@ -631,6 +686,7 @@ async function tellAboutUpdates($: Engine): Promise<void> {
 async function report($: Engine): Promise<string> {
   const { reading, limit, isAutoCompact } = await inspect($)
   await show($, reading)
+  const { settings, project, layers } = await settingsHere($)
 
   return reportText({
     gauge: reading,
@@ -638,7 +694,9 @@ async function report($: Engine): Promise<string> {
     isAutoCompact,
     told: await read($, told),
     proposal: await read($, proposal),
-    settings: await settingsNow($),
+    settings,
+    project,
+    layers,
     engineVersion,
     updates: await updatesNow($),
     lastError,
@@ -672,7 +730,7 @@ export const register: Register = on => {
       await $.command.register({
         name: COMMAND,
         description: COMMAND_DESCRIPTION,
-        argumentHint: '[setting value]',
+        argumentHint: '[project] [setting value]',
       })
       await $.tool.register({
         name: TOOL_NAME,
@@ -889,9 +947,12 @@ export const register: Register = on => {
   })
 
   // The report, which is also the health check on demand, or a change to a
-  // setting. A change is saved for every session, and answers with the report.
+  // setting. A change is saved for every session on this machine, or for the
+  // project's folder, and answers with the report.
   on('command.run', { command: COMMAND }, async ($, e) => {
     const text = await guarded($, 'the command', async () => {
+      // After a /cd the session is in another project: read its settings afresh.
+      settingsCache = undefined
       await checkFloor($)
 
       if (isOff) {
@@ -908,10 +969,21 @@ export const register: Register = on => {
         return report($)
       }
 
-      await saveSettings($, request.kind === 'reset' ? undefined : request.change)
-      const said = request.kind === 'reset' ? 'Put the settings back to their defaults.' : request.said
+      const { project, layers } = await settingsHere($)
+      const key =
+        request.scope === 'machine'
+          ? SETTINGS_KEY
+          : project === undefined
+            ? undefined
+            : folderKey(project)
 
-      return `${said}\n\n${await report($)}`
+      if (key === undefined) {
+        return `${NO_PROJECT}\n\n${USAGE}`
+      }
+
+      await saveSettings($, key, request.kind === 'set' ? request.change : undefined)
+
+      return `${changedText(request, project, layers)}\n\n${await report($)}`
     })
 
     return { text: text ?? `Health: needs attention, error in ${lastError ?? 'the command'}` }

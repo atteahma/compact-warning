@@ -138,14 +138,34 @@ The tool's description tells the model to aim for 3,000 characters. The tool tak
 ## The settings
 
 The mod declares no `userConfig`, because Claude Code asks for every such option at
-install, also for one with a default. The settings live in the mod's store instead, under
-the key `settings`.
+install, also for one with a default. The settings live in the mod's store instead.
 
+| Key | What it holds | Set by |
+|---|---|---|
+| `settings` | The machine's settings. | `/compact-warning stop 300k` |
+| `settings:<folder>` | The settings of one folder, such as `settings:/Users/sam/repos/app`. | `/compact-warning project stop 300k`, for the session's project |
+
+- **The project is the session's root,** `$.session.root()`. A worktree that Claude Code
+  made, `<repo>/.claude/worktrees/<name>`, counts as its repository: `projectOf` cuts the
+  path at the first such segment, with either slash. When the root cannot be read, there is
+  no project: the machine's settings apply, and a `project` command is refused.
+- **The settings come in layers,** each over the one before: the defaults, the machine's,
+  then each folder that is the project or contains it, outermost first. So the nearest
+  folder wins, setting by setting. `foldersFor` finds the folders among `$.store.keys()`.
+  A folder matches on whole path segments: `/work/app` holds in `/work/app/src`, and not
+  in `/work/app2`.
+- **Each folder has a key of its own.** A change reads, merges and writes one key. With all
+  folders under one key, two sessions in different projects could overwrite each other's
+  change.
 - **The store holds only what the person changed.** A setting they never touched follows the
   default of a later release.
-- **Every session reads the store again after ten seconds,** so a change reaches them all.
+- **Every session reads the store and its root again after ten seconds,** so a change
+  reaches them all. `/compact-warning` reads them at once, so that its report after a `/cd`
+  shows the new project.
 - **A value that does not fit is left out** when the store is read: the store outlives a
-  release.
+  release. A folder with nothing valid left is skipped.
+- **A read that fails holds no nudge back.** If the root, the keys or a value cannot be
+  read, that part counts as not set.
 
 ## The files
 
@@ -172,7 +192,7 @@ the key `settings`.
 | `session.compact` | Passes the proposal on when you typed no instructions, and a subagent's proposal to that subagent's compaction. Refuses a summary computed ahead of time. Clears the state afterwards. |
 | `session.end` | Clears the state on `/clear`. |
 | `session.measure` | Redraws the status line. |
-| `command.run` | Answers `/compact-warning`: the report, or a change to a setting. |
+| `command.run` | Answers `/compact-warning`: the report, or a change to a setting of the machine or of the project. |
 | `ui.render` | Draws the start line and the "Ready to compact" row. |
 
 Every hook passes its event on unchanged when the mod's own work fails.
@@ -241,6 +261,9 @@ and passes them on when the compaction comes.
 - **Settings per machine.** They live in the mod's own store, not in `settings.json`. Claude
   Code drops a store that no session used for its cleanup period, and the settings then
   return to their defaults.
+- **A project's settings follow its folder's path.** After a folder is renamed or moved,
+  its settings no longer apply: set them again. The old key stays in the store, and nothing
+  reads it. Claude Code keeps its own state for a project by path too.
 
 ## What the mod cannot see
 

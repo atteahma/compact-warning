@@ -1,6 +1,6 @@
 {
   "name": "compact-warning",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Warns Claude before auto-compaction, so it stops at a good breakpoint and hands you a ready /compact line.",
   "author": {
     "name": "atteahma"

@@ -9,20 +9,26 @@ import {
   MAX_NAMED,
   MAX_SUBAGENT_ASKS,
   MIN_VERSION,
+  NO_PROJECT,
   SUBAGENTS_MIN_VERSION,
   SUBAGENT_ROOM,
   TOOL_DESCRIPTION,
   USAGE,
   ageOf,
   asksSubagents,
+  changedText,
   cleanInstructions,
   compactLine,
   endedIn,
   errorToast,
+  folderKey,
+  folderOf,
+  foldersFor,
   gaugeOf,
   greetingText,
   hasShrunk,
   healthText,
+  holdsIn,
   installOf,
   instructionsFor,
   isAutoUpdated,
@@ -34,6 +40,7 @@ import {
   nudgeText,
   offGreeting,
   offReport,
+  projectOf,
   readyHint,
   readyText,
   refusalOf,
@@ -59,7 +66,7 @@ import {
   updateCommand,
   updatesText,
 } from '../hooks/logic'
-import type { Report, Settings, Task } from '../hooks/logic'
+import type { Change, Layer, Report, Settings, Task } from '../hooks/logic'
 
 /** The auto-compaction point of a 1M window, and of a 200k window. */
 const LARGE = 967_000
@@ -106,43 +113,172 @@ test('the store keeps only what the person changed, and a broken value is left o
 })
 
 test('the command reads a setting and its value', () => {
+  const machine = { kind: 'set', scope: 'machine' } as const
+
   expect(requestOf('')).toEqual({ kind: 'report' })
-  expect(requestOf('  reset ')).toEqual({ kind: 'reset' })
+  expect(requestOf('  reset ')).toEqual({ kind: 'reset', scope: 'machine' })
   expect(requestOf('stop 300k')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { stop: tokens(300_000) },
     said: 'Set stop to 300k.',
   })
   expect(requestOf('WARN 75%')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { warn: percent(75) },
     said: 'Set warn to 75%.',
   })
   expect(requestOf('stop 1.2M')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { stop: tokens(1_200_000) },
     said: 'Set stop to 1.2M.',
   })
   expect(requestOf('reserve 20k')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { reserveTokens: 20_000 },
     said: 'Set reserve to 20k.',
   })
   expect(requestOf('reserve 0')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { reserveTokens: 0 },
     said: 'Set reserve to 0.',
   })
   expect(requestOf('unattended on')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { isUnattended: true },
     said: 'Set unattended to on.',
   })
   expect(requestOf('subagents off')).toEqual({
-    kind: 'set',
+    ...machine,
     change: { isForSubagents: false },
     said: 'Set subagents to off.',
   })
+})
+
+test('project before a setting changes it for the project only', () => {
+  expect(requestOf('project stop 300k')).toEqual({
+    kind: 'set',
+    scope: 'project',
+    change: { stop: tokens(300_000) },
+    said: 'Set stop to 300k for this project.',
+  })
+  expect(requestOf(' Project  UNATTENDED on ')).toEqual({
+    kind: 'set',
+    scope: 'project',
+    change: { isUnattended: true },
+    said: 'Set unattended to on for this project.',
+  })
+  expect(requestOf('project reset')).toEqual({ kind: 'reset', scope: 'project' })
+
+  // Alone, with a bad value, or with too many words, it is refused with a reason.
+  expect(requestOf('project')).toEqual({
+    kind: 'refuse',
+    why: 'Give project a setting and its value, or reset.',
+  })
+  expect(requestOf('project stop 80')).toEqual({
+    kind: 'refuse',
+    why: 'Give stop a percentage such as 80%, or a token count such as 250k.',
+  })
+  expect(requestOf('project stop 300k now')).toEqual({
+    kind: 'refuse',
+    why: 'Give one setting and one value.',
+  })
+  expect(requestOf('project colour blue')).toEqual({ kind: 'refuse', why: 'There is no setting "colour".' })
+
+  expect(USAGE).toContain(
+    "/compact-warning reset: back to the defaults\n/compact-warning project stop 300k: any setting, for this project only\n/compact-warning project reset: remove this project's settings",
+  )
+})
+
+test('a project is the session root, and a worktree that Claude Code made counts as its repository', () => {
+  expect(projectOf('/Users/sam/repos/app')).toBe('/Users/sam/repos/app')
+  expect(projectOf('/Users/sam/repos/app/.claude/worktrees/fix-login')).toBe('/Users/sam/repos/app')
+  expect(projectOf('C:\\Users\\sam\\app\\.claude\\worktrees\\fix-login')).toBe('C:\\Users\\sam\\app')
+  // A nested name, and a worktree made inside a worktree, cut at the first such segment.
+  expect(projectOf('/work/app/.claude/worktrees/team/fix')).toBe('/work/app')
+  expect(projectOf('/work/app/.claude/worktrees/a/.claude/worktrees/b')).toBe('/work/app')
+  // Another folder under .claude is an ordinary folder.
+  expect(projectOf('/work/app/.claude/rules')).toBe('/work/app/.claude/rules')
+  expect(projectOf('')).toBeUndefined()
+})
+
+test("a folder's settings hold in that folder and in every folder inside it", () => {
+  expect(folderKey('/work/app')).toBe('settings:/work/app')
+  expect(folderOf('settings:/work/app')).toBe('/work/app')
+  // The machine's key and the mod's other keys name no folder.
+  expect(folderOf('settings')).toBeUndefined()
+  expect(folderOf('settings:')).toBeUndefined()
+  expect(folderOf('toldAboutUpdates')).toBeUndefined()
+
+  expect(holdsIn('/work/app', '/work/app')).toBe(true)
+  expect(holdsIn('/work/app', '/work/app/src')).toBe(true)
+  // Whole segments only: a sibling with the same start is another folder.
+  expect(holdsIn('/work/app', '/work/app2')).toBe(false)
+  expect(holdsIn('/work/app/src', '/work/app')).toBe(false)
+  expect(holdsIn('/', '/work/app')).toBe(true)
+  expect(holdsIn('C:\\work', 'C:\\work\\app')).toBe(true)
+  expect(holdsIn('C:\\work', 'C:\\work2')).toBe(false)
+
+  const keys = [
+    'settings',
+    'toldAboutUpdates',
+    'settings:/work/app/src',
+    folderKey('/work/app'),
+    folderKey('/work/app2'),
+    folderKey('/work'),
+    folderKey('/'),
+  ]
+  expect(foldersFor(keys, '/work/app')).toEqual(['/', '/work', '/work/app'])
+  expect(foldersFor(keys, '/work/app/src/lib')).toEqual(['/', '/work', '/work/app', '/work/app/src'])
+  expect(foldersFor(keys, '/home/sam')).toEqual(['/'])
+  expect(foldersFor([folderKey('C:\\work'), folderKey('C:\\work2')], 'C:\\work\\app')).toEqual(['C:\\work'])
+})
+
+test('the nearest folder wins, setting by setting, over the machine and the defaults', () => {
+  const layers: Layer[] = [
+    { folder: '/work', stored: { stop: tokens(400_000), reserveTokens: 0 } },
+    { folder: '/work/app', stored: { stop: tokens(300_000) } },
+  ]
+
+  expect(settingsOf({ stop: tokens(500_000), isUnattended: true }, layers)).toEqual({
+    warn: percent(80),
+    stop: tokens(300_000),
+    reserveTokens: 0,
+    isUnattended: true,
+    isForSubagents: true,
+  })
+  expect(settingsOf(undefined, [])).toEqual(DEFAULT_SETTINGS)
+})
+
+test('after a change the command says where it holds', () => {
+  const project = '/work/app'
+  const own: Layer = { folder: project, stored: { stop: tokens(300_000) } }
+  const around: Layer = { folder: '/work', stored: { stop: tokens(400_000), isUnattended: true } }
+  const change = (args: string): Change => requestOf(args) as Change
+
+  expect(changedText(change('project stop 300k'), project, [])).toBe('Set stop to 300k for this project.')
+  expect(changedText(change('stop 65%'), project, [])).toBe('Set stop to 65%.')
+  // A folder that sets the same setting wins over the machine's; the innermost one is named.
+  expect(changedText(change('stop 65%'), project, [around, own])).toBe(
+    'Set stop to 65%. It does not hold here: stop 300k is set for this project.',
+  )
+  expect(changedText(change('unattended off'), project, [around, own])).toBe(
+    'Set unattended to off. It does not hold here: unattended on is set for /work.',
+  )
+  expect(changedText(change('warn 70%'), project, [around, own])).toBe('Set warn to 70%.')
+
+  expect(changedText(change('reset'), project, [])).toBe('Put the settings back to their defaults.')
+  expect(changedText(change('reset'), project, [around, own])).toBe(
+    'Put the settings back to their defaults. This project keeps its own.',
+  )
+  expect(changedText(change('reset'), project, [around])).toBe(
+    'Put the settings back to their defaults. /work keeps its own.',
+  )
+
+  expect(changedText(change('project reset'), project, [around, own])).toBe("Removed this project's settings.")
+  expect(changedText(change('project reset'), project, [around])).toBe(
+    'This project has no settings of its own.',
+  )
+  expect(NO_PROJECT).toBe('This session has no project folder, so it has no settings of its own.')
 })
 
 test('the command refuses what it cannot read, and says why', () => {
@@ -187,8 +323,8 @@ test('the subagent part needs a newer Claude Code than the rest, and says so', (
   expect(subagentsLine(withSettings({ isForSubagents: false }), '2.1.325')).toBe(undefined)
 
   const lines = reportText({ ...REPORT, engineVersion: '2.1.325' }).split('\n')
-  expect(lines[5]).toBe('Claude Code: 2.1.325')
-  expect(lines[6]).toBe('Subagents: not asked on this Claude Code. That part needs 2.1.326 or later.')
+  expect(lines[6]).toBe('Claude Code: 2.1.325')
+  expect(lines[7]).toBe('Subagents: not asked on this Claude Code. That part needs 2.1.326 or later.')
 })
 
 test('a subagent is compacted where the main conversation would be, in its own window', () => {
@@ -459,6 +595,8 @@ const REPORT: Report = {
   told: 'none',
   proposal: null,
   settings: DEFAULT_SETTINGS,
+  project: '/work/app',
+  layers: [],
   engineVersion: '2.1.326',
   updates: undefined,
   lastError: undefined,
@@ -516,9 +654,9 @@ test('the report says how updates arrive, and names the marketplace in the fix',
   )
 
   const lines = reportText({ ...REPORT, updates: byHand }).split('\n')
-  expect(lines[5]).toBe('Claude Code: 2.1.326')
-  expect(lines[6]).toBe(updatesText(byHand))
-  expect(lines[7]).toBe('Proposal: none')
+  expect(lines[6]).toBe('Claude Code: 2.1.326')
+  expect(lines[7]).toBe(updatesText(byHand))
+  expect(lines[8]).toBe('Proposal: none')
 })
 
 test('the report is one fact to a line', () => {
@@ -529,6 +667,7 @@ test('the report is one fact to a line', () => {
       'Nudges: at 774k and 851k tokens, none sent yet',
       'Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on',
       'To change one: /compact-warning stop 300k',
+      'For this project only: /compact-warning project stop 300k',
       'Claude Code: 2.1.326',
       'Proposal: none',
     ].join('\n'),
@@ -552,6 +691,27 @@ test('the report is one fact to a line', () => {
   expect(
     reportText({ ...REPORT, gauge: gaugeOf(164_000, 200_000, false), limit: 200_000, isAutoCompact: false }),
   ).toContain('Context: 164k of 200k tokens, 82% of the window (auto-compact is off)')
+})
+
+test('the report names each folder that sets something, outermost first', () => {
+  const layers: Layer[] = [
+    { folder: '/work', stored: { isUnattended: true } },
+    { folder: '/work/app', stored: { stop: tokens(300_000), isUnattended: true } },
+  ]
+  const settings = settingsOf(undefined, layers)
+
+  expect(reportText({ ...REPORT, settings, layers }).split('\n').slice(3, 8)).toEqual([
+    'Settings: warn 80%, stop 300k, reserve 30k, unattended on, subagents on',
+    'Set for /work: unattended on',
+    'Set for this project: stop 300k, unattended on',
+    'To change one: /compact-warning stop 300k',
+    'For this project only: /compact-warning project stop 300k',
+  ])
+
+  // A session without a project has no line for one.
+  const lines = reportText({ ...REPORT, project: undefined }).split('\n')
+  expect(lines[4]).toBe('To change one: /compact-warning stop 300k')
+  expect(lines[5]).toBe('Claude Code: 2.1.326')
 })
 
 test('old instructions reach the summary with a caveat', () => {

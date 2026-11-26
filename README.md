@@ -102,6 +102,7 @@ Context: 116k of 967k tokens, 12% of auto-compact
 Nudges: at 774k and 851k tokens, none sent yet
 Settings: warn 80%, stop 88%, reserve 30k, unattended off, subagents on
 To change one: /compact-warning stop 300k
+For this project only: /compact-warning project stop 300k
 Claude Code: 2.1.328
 Updates: automatic
 Proposal: none
@@ -110,7 +111,8 @@ Proposal: none
 ## Settings
 
 Everything works without them. To change one, give `/compact-warning` the setting and its
-value. The change holds at once, for every session on this machine.
+value. The change holds at once, for every session on this machine. A project can also have
+settings of its own: see [For one project](#for-one-project).
 
 ```text
 /compact-warning stop 300k
@@ -137,6 +139,24 @@ value. The change holds at once, for every session on this machine.
 - **To change what Claude does at a breakpoint,** add a rule of your own. A starting point:
   copy [`docs/compact-breakpoint.md`](docs/compact-breakpoint.md) to `~/.claude/rules/` and
   edit it.
+
+### For one project
+
+Put `project` before a setting to change it only for the project you are in:
+
+```text
+/compact-warning project stop 300k
+/compact-warning project reset
+```
+
+- **A project is the folder the session runs in.** Its settings also hold in the folders
+  inside it, and in a worktree that Claude Code made of it.
+- **A project's setting wins over the machine's.** Where projects nest, the nearest one
+  wins.
+- **The settings stay on this machine.** Nothing is written into the project.
+- **`project reset` removes them.** Plain `reset` leaves them, and puts only the machine's
+  settings back.
+- **`/compact-warning` shows them,** one line for each folder that sets something.
 
 ## If something looks wrong
 

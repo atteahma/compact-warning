@@ -4,6 +4,23 @@ Each release names the Claude Code versions it was checked on. Claude Code ships
 daily, so a release can stop working on a later version. The daily check in this repository
 shows when that happens.
 
+## 0.4.0
+
+Checked on Claude Code 2.1.332. The tests also pass on 2.1.325, the oldest version it runs
+on.
+
+- **Settings for one project.** `/compact-warning project stop 300k` changes a setting for
+  the project you are in. It also holds in the folders inside it, and in a worktree that
+  Claude Code made of it.
+- **A project's setting wins over the machine's.** Where projects nest, the nearest one
+  wins, setting by setting.
+- **Nothing is written into the project.** Its settings stay in the mod's store on this
+  machine.
+- **`/compact-warning project reset` removes them.** Plain `reset` puts only the machine's
+  settings back, and says when a project keeps its own.
+- **The report shows them,** one line for each folder that sets something. A change to the
+  machine's setting says when a project's setting overrides it.
+
 ## 0.3.1
 
 Checked on Claude Code 2.1.330. The tests also pass on 2.1.325, the oldest version it runs

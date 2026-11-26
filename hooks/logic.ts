@@ -101,7 +101,7 @@ export const DEFAULT_SETTINGS: Settings = {
   isForSubagents: true,
 }
 
-/** The store's key for the settings. */
+/** The store's key for the machine's settings. */
 export const SETTINGS_KEY = 'settings'
 
 /**
@@ -109,6 +109,65 @@ export const SETTINGS_KEY = 'settings'
  * never touched follows the default of a later version.
  */
 export type StoredSettings = Partial<Settings>
+
+/**
+ * The start of the store's key for the settings of one folder. Each folder has
+ * a key of its own, so that two sessions in different projects never
+ * overwrite each other's change.
+ */
+const FOLDER_PREFIX = `${SETTINGS_KEY}:`
+
+/** The store's key for the settings of one folder. */
+export function folderKey(folder: string): string {
+  return `${FOLDER_PREFIX}${folder}`
+}
+
+/** The folder that a store key holds settings for; undefined for any other key. */
+export function folderOf(key: string): string | undefined {
+  const folder = key.slice(FOLDER_PREFIX.length)
+
+  return key.startsWith(FOLDER_PREFIX) && folder !== '' ? folder : undefined
+}
+
+// <repo>/.claude/worktrees/<name>, with either slash: a worktree that Claude Code made.
+const WORKTREE = /^(.+?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]/
+const ENDS_IN_SLASH = /[\\/]$/
+const STARTS_WITH_SLASH = /^[\\/]/
+
+/**
+ * The project of a session: its root, or for a worktree that Claude Code made,
+ * the repository. Undefined when the root is empty.
+ */
+export function projectOf(root: string): string | undefined {
+  return root === '' ? undefined : (WORKTREE.exec(root)?.[1] ?? root)
+}
+
+/**
+ * True when the settings of `folder` hold in `project`: it is that folder, or
+ * a folder inside it. The paths match on whole segments, with either slash.
+ */
+export function holdsIn(folder: string, project: string): boolean {
+  const rest = project.slice(folder.length)
+
+  return (
+    project.startsWith(folder) &&
+    (rest === '' || ENDS_IN_SLASH.test(folder) || STARTS_WITH_SLASH.test(rest))
+  )
+}
+
+/** The folders among the store's keys whose settings hold in `project`, outermost first. */
+export function foldersFor(keys: readonly string[], project: string): string[] {
+  return keys
+    .flatMap(key => {
+      const folder = folderOf(key)
+
+      return folder !== undefined && holdsIn(folder, project) ? [folder] : []
+    })
+    .sort((one, other) => one.length - other.length)
+}
+
+/** The settings of one folder. They hold in it, and in every folder inside it. */
+export type Layer = { folder: string; stored: StoredSettings }
 
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0
@@ -146,9 +205,15 @@ export function storedOf(value: unknown): StoredSettings {
   }
 }
 
-/** The settings in force: the defaults, with what the person changed. */
-export function settingsOf(value: unknown): Settings {
-  return { ...DEFAULT_SETTINGS, ...storedOf(value) }
+/**
+ * The settings in force: the defaults, then the machine's, then each folder's,
+ * outermost first. So the nearest folder wins, setting by setting.
+ */
+export function settingsOf(machine: unknown, layers: readonly Layer[] = []): Settings {
+  return layers.reduce<Settings>(
+    (settings, layer) => ({ ...settings, ...layer.stored }),
+    { ...DEFAULT_SETTINGS, ...storedOf(machine) },
+  )
 }
 
 const PERCENT = /^(\d{1,2})%$/
@@ -184,12 +249,18 @@ function markText(mark: Mark): string {
   return mark.unit === 'percent' ? `${mark.value}%` : tokensText(mark.value)
 }
 
+/** Where a change goes: the machine's settings, or the project's. */
+export type Scope = 'machine' | 'project'
+
 /** What `/compact-warning <args>` asks for. */
 export type Request =
   | { kind: 'report' }
-  | { kind: 'reset' }
-  | { kind: 'set'; change: StoredSettings; said: string }
+  | { kind: 'reset'; scope: Scope }
+  | { kind: 'set'; scope: Scope; change: StoredSettings; said: string }
   | { kind: 'refuse'; why: string }
+
+/** A request that changes the settings. */
+export type Change = Extract<Request, { kind: 'reset' | 'set' }>
 
 export const USAGE = [
   'Settings:',
@@ -199,18 +270,31 @@ export const USAGE = [
   `/${COMMAND} unattended on: compact without asking`,
   `/${COMMAND} subagents off: leave subagents alone`,
   `/${COMMAND} reset: back to the defaults`,
+  `/${COMMAND} project stop 300k: any setting, for this project only`,
+  `/${COMMAND} project reset: remove this project's settings`,
 ].join('\n')
 
 /** Reads what the person typed after the command's name. */
 export function requestOf(args: string): Request {
-  const [name = '', value = '', ...rest] = args.trim().toLowerCase().split(/\s+/)
+  const words = args.trim().toLowerCase().split(/\s+/)
+  const scope: Scope = words[0] === 'project' ? 'project' : 'machine'
+  const [name = '', value = '', ...rest] = scope === 'project' ? words.slice(1) : words
+  const where = scope === 'project' ? ' for this project' : ''
+  const set = (change: StoredSettings, shown: string): Request => ({
+    kind: 'set',
+    scope,
+    change,
+    said: `Set ${name} to ${shown}${where}.`,
+  })
 
   if (name === '') {
-    return { kind: 'report' }
+    return scope === 'project'
+      ? { kind: 'refuse', why: 'Give project a setting and its value, or reset.' }
+      : { kind: 'report' }
   }
 
   if (name === 'reset' && value === '') {
-    return { kind: 'reset' }
+    return { kind: 'reset', scope }
   }
 
   if (rest.length > 0) {
@@ -222,7 +306,7 @@ export function requestOf(args: string): Request {
 
     return mark === undefined
       ? { kind: 'refuse', why: `Give ${name} a percentage such as 80%, or a token count such as 250k.` }
-      : { kind: 'set', change: { [name]: mark }, said: `Set ${name} to ${markText(mark)}.` }
+      : set({ [name]: mark }, markText(mark))
   }
 
   if (name === 'reserve') {
@@ -230,33 +314,91 @@ export function requestOf(args: string): Request {
 
     return tokens === undefined
       ? { kind: 'refuse', why: 'Give reserve a token count such as 30k, or 0 for none.' }
-      : { kind: 'set', change: { reserveTokens: tokens }, said: `Set reserve to ${tokensText(tokens)}.` }
+      : set({ reserveTokens: tokens }, tokensText(tokens))
   }
 
   if (name === 'unattended') {
     return value === 'on' || value === 'off'
-      ? { kind: 'set', change: { isUnattended: value === 'on' }, said: `Set unattended to ${value}.` }
+      ? set({ isUnattended: value === 'on' }, value)
       : { kind: 'refuse', why: 'Give unattended the value on or off.' }
   }
 
   if (name === 'subagents') {
     return value === 'on' || value === 'off'
-      ? { kind: 'set', change: { isForSubagents: value === 'on' }, said: `Set subagents to ${value}.` }
+      ? set({ isForSubagents: value === 'on' }, value)
       : { kind: 'refuse', why: 'Give subagents the value on or off.' }
   }
 
   return { kind: 'refuse', why: `There is no setting "${name}".` }
 }
 
-/** The settings in one line, as the report and the README write them. */
-export function settingsText(settings: Settings): string {
+function onOff(value: boolean): string {
+  return value ? 'on' : 'off'
+}
+
+/**
+ * The settings in one line, as the report and the README write them. For a
+ * folder, only the ones it sets.
+ */
+export function settingsText(stored: StoredSettings): string {
+  const { warn, stop, reserveTokens, isUnattended, isForSubagents } = stored
+
   return [
-    `warn ${markText(settings.warn)}`,
-    `stop ${markText(settings.stop)}`,
-    `reserve ${tokensText(settings.reserveTokens)}`,
-    `unattended ${settings.isUnattended ? 'on' : 'off'}`,
-    `subagents ${settings.isForSubagents ? 'on' : 'off'}`,
-  ].join(', ')
+    warn === undefined ? undefined : `warn ${markText(warn)}`,
+    stop === undefined ? undefined : `stop ${markText(stop)}`,
+    reserveTokens === undefined ? undefined : `reserve ${tokensText(reserveTokens)}`,
+    isUnattended === undefined ? undefined : `unattended ${onOff(isUnattended)}`,
+    isForSubagents === undefined ? undefined : `subagents ${onOff(isForSubagents)}`,
+  ]
+    .filter(part => part !== undefined)
+    .join(', ')
+}
+
+/** Why a `project` command is refused in a session that has no project. */
+export const NO_PROJECT = 'This session has no project folder, so it has no settings of its own.'
+
+const RESET_SAID = 'Put the settings back to their defaults.'
+
+/** A folder as the texts name it: the project itself is "this project". */
+function placeOf(folder: string, project: string | undefined): string {
+  return folder === project ? 'this project' : folder
+}
+
+/** What `stored` holds of the settings that `change` sets. */
+function sameAs(stored: StoredSettings, change: StoredSettings): StoredSettings {
+  return storedOf(Object.fromEntries(Object.entries(stored).filter(([name]) => name in change)))
+}
+
+/**
+ * What the command says after a change, before the report. `layers` are the
+ * folders' settings that held in this session before the change.
+ */
+export function changedText(change: Change, project: string | undefined, layers: readonly Layer[]): string {
+  if (change.kind === 'reset' && change.scope === 'project') {
+    return layers.some(layer => layer.folder === project)
+      ? "Removed this project's settings."
+      : 'This project has no settings of its own.'
+  }
+
+  if (change.kind === 'reset') {
+    const innermost = layers[layers.length - 1]
+
+    return innermost === undefined
+      ? RESET_SAID
+      : `${RESET_SAID} ${capitalized(placeOf(innermost.folder, project))} keeps its own.`
+  }
+
+  if (change.scope === 'project') {
+    return change.said
+  }
+
+  // The innermost folder that sets the same setting wins over the machine's.
+  const names = Object.keys(change.change)
+  const over = [...layers].reverse().find(layer => names.some(name => name in layer.stored))
+
+  return over === undefined
+    ? change.said
+    : `${change.said} It does not hold here: ${settingsText(sameAs(over.stored, change.change))} is set for ${placeOf(over.folder, project)}.`
 }
 
 /**
@@ -879,7 +1021,12 @@ export type Report = {
   isAutoCompact: boolean
   told: Told
   proposal: Proposal | null
+  /** The settings in force. */
   settings: Settings
+  /** Undefined when the session's root cannot be read. */
+  project: string | undefined
+  /** The folders' settings that hold in this session, outermost first. */
+  layers: readonly Layer[]
   engineVersion: string | undefined
   /** Undefined for a copy that Claude Code reads in place. */
   updates: Updates | undefined
@@ -920,7 +1067,8 @@ function proposalLine(proposal: Proposal | null, gauge: Gauge | null): string {
 
 /** What /compact-warning prints. */
 export function reportText(report: Report): string {
-  const { gauge, limit, told, proposal, settings, engineVersion, updates, lastError } = report
+  const { gauge, limit, told, proposal, settings, project, layers, engineVersion, updates, lastError } =
+    report
   const subagents = subagentsLine(settings, engineVersion)
 
   return [
@@ -928,7 +1076,9 @@ export function reportText(report: Report): string {
     contextLine(report),
     `Nudges: ${nudgesAt(thresholdsOf(limit, settings))}, ${TOLD_WORDS[told]}`,
     `Settings: ${settingsText(settings)}`,
+    ...layers.map(layer => `Set for ${placeOf(layer.folder, project)}: ${settingsText(layer.stored)}`),
     `To change one: /${COMMAND} stop 300k`,
+    ...(project === undefined ? [] : [`For this project only: /${COMMAND} project stop 300k`]),
     `Claude Code: ${engineVersion ?? 'unknown version'}`,
     ...(subagents === undefined ? [] : [subagents]),
     ...(updates === undefined ? [] : [updatesText(updates)]),
